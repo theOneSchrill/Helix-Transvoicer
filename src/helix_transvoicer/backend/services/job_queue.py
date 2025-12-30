@@ -138,7 +138,10 @@ class JobQueue:
                 if asyncio.iscoroutinefunction(func):
                     result = await func(*args, progress_callback=progress_callback, **kwargs)
                 else:
-                    result = func(*args, progress_callback=progress_callback, **kwargs)
+                    # Run sync functions in thread pool to avoid blocking event loop
+                    import functools
+                    partial_func = functools.partial(func, *args, progress_callback=progress_callback, **kwargs)
+                    result = await asyncio.to_thread(partial_func)
 
                 job.result = result
                 job.status = JobStatus.COMPLETED

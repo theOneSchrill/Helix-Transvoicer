@@ -181,14 +181,17 @@ async def train_model(
             temp_paths.append(tmp.name)
 
     async def train_task(progress_callback):
+        import asyncio
+
         trainer = ModelTrainer(
             device=device_manager.device,
             models_dir=model_manager.models_dir,
         )
 
-        # Prepare samples
+        # Prepare samples (run sync code in thread pool to avoid blocking)
         progress_callback("Preparing samples", 0.1)
-        samples = trainer.prepare_samples(
+        samples = await asyncio.to_thread(
+            trainer.prepare_samples,
             temp_paths,
             progress_callback=lambda s, p: progress_callback(s, 0.1 + p * 0.2),
         )
@@ -203,14 +206,16 @@ async def train_model(
             augment_data=augment_data,
         )
 
-        # Train
+        # Train (run sync code in thread pool to avoid blocking)
         def training_progress(p):
             progress_callback(
                 f"Training epoch {p.epoch}/{p.total_epochs}",
                 0.3 + (p.epoch / p.total_epochs) * 0.6,
             )
 
-        result = trainer.train(samples, config, training_progress)
+        result = await asyncio.to_thread(
+            trainer.train, samples, config, training_progress
+        )
 
         # Cleanup temp files
         for path in temp_paths:
@@ -276,16 +281,19 @@ async def update_model(
             temp_paths.append(tmp.name)
 
     async def update_task(progress_callback):
+        import asyncio
+
         trainer = ModelTrainer(
             device=device_manager.device,
             models_dir=model_manager.models_dir,
         )
 
         progress_callback("Preparing new samples", 0.1)
-        samples = trainer.prepare_samples(temp_paths)
+        samples = await asyncio.to_thread(trainer.prepare_samples, temp_paths)
 
         progress_callback("Updating model", 0.3)
-        result = trainer.update_model(
+        result = await asyncio.to_thread(
+            trainer.update_model,
             model_id,
             samples,
             epochs=epochs,
