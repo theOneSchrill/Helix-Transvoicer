@@ -65,7 +65,34 @@ class ModelManager:
     async def initialize(self) -> None:
         """Initialize model manager and scan for models."""
         self.models_dir.mkdir(parents=True, exist_ok=True)
+        # Clean up any incomplete models from interrupted training
+        await self._cleanup_incomplete_models()
         await self.refresh()
+
+    async def _cleanup_incomplete_models(self) -> None:
+        """Remove incomplete model directories from interrupted training sessions."""
+        if not self.models_dir.exists():
+            return
+
+        required_files = ["metadata.json", "speaker_encoder.pt", "decoder.pt", "content_encoder.pt"]
+
+        for model_dir in self.models_dir.iterdir():
+            if not model_dir.is_dir():
+                continue
+
+            # Check if all required files exist
+            missing_files = [f for f in required_files if not (model_dir / f).exists()]
+
+            if missing_files:
+                logger.warning(
+                    f"Found incomplete model '{model_dir.name}' (missing: {', '.join(missing_files)}). "
+                    f"Removing..."
+                )
+                try:
+                    shutil.rmtree(model_dir)
+                    logger.info(f"Removed incomplete model directory: {model_dir.name}")
+                except Exception as e:
+                    logger.error(f"Failed to remove incomplete model {model_dir.name}: {e}")
 
     async def refresh(self) -> None:
         """Scan and index all models in storage."""

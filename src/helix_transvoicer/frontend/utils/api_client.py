@@ -48,6 +48,12 @@ class APIClient:
         response.raise_for_status()
         return response.json()
 
+    def get_job(self, job_id: str) -> Dict:
+        """Get job status by ID."""
+        response = self._client.get(self._url(f"/api/system/jobs/{job_id}"))
+        response.raise_for_status()
+        return response.json()
+
     def cancel_job(self, job_id: str) -> Dict:
         """Cancel a job."""
         response = self._client.post(self._url(f"/api/system/jobs/{job_id}/cancel"))
