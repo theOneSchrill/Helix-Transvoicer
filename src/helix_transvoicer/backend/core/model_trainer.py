@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from helix_transvoicer.backend.core.audio_processor import AudioProcessor, ProcessedAudio
 from helix_transvoicer.backend.core.emotion_analyzer import EmotionAnalyzer
-from helix_transvoicer.backend.models.encoder import SpeakerEncoder
+from helix_transvoicer.backend.models.encoder import ContentEncoder, SpeakerEncoder
 from helix_transvoicer.backend.models.decoder import VoiceDecoder
 from helix_transvoicer.backend.utils.audio import AudioUtils
 from helix_transvoicer.backend.utils.config import get_settings
@@ -271,11 +271,16 @@ class ModelTrainer:
         )
 
         # Initialize models
-        speaker_encoder = SpeakerEncoder().to(self.device)
-        decoder = VoiceDecoder().to(self.device)
+        content_encoder = ContentEncoder().to(self.device)
+        speaker_encoder = SpeakerEncoder(input_dim=self.settings.n_mels).to(self.device)
+        decoder = VoiceDecoder(n_mels=self.settings.n_mels).to(self.device)
 
         # Initialize optimizer
-        params = list(speaker_encoder.parameters()) + list(decoder.parameters())
+        params = (
+            list(content_encoder.parameters()) +
+            list(speaker_encoder.parameters()) +
+            list(decoder.parameters())
+        )
         optimizer = optim.AdamW(
             params,
             lr=config.learning_rate,
@@ -303,21 +308,35 @@ class ModelTrainer:
                     break
 
                 epoch_loss = 0.0
+                content_encoder.train()
                 speaker_encoder.train()
                 decoder.train()
 
                 for batch in dataloader:
-                    mel = batch["mel"].to(self.device)
-                    audio = batch["audio"].to(self.device)
+                    mel = batch["mel"].to(self.device)  # [batch, n_mels, time]
+                    audio = batch["audio"].to(self.device)  # [batch, samples]
 
                     optimizer.zero_grad()
 
-                    # Forward pass
-                    speaker_embedding = speaker_encoder(mel)
-                    reconstructed = decoder(mel, speaker_embedding)
+                    # Extract content features from audio
+                    content_features = content_encoder(audio)  # [batch, time, 256]
+
+                    # Extract speaker embedding from mel
+                    speaker_embedding = speaker_encoder(mel)  # [batch, 256]
+
+                    # Decode to mel spectrogram
+                    reconstructed = decoder(content_features, speaker_embedding)  # [batch, time, n_mels]
+
+                    # Target mel needs to match reconstructed shape [batch, time, n_mels]
+                    target_mel = mel.transpose(1, 2)  # [batch, time, n_mels]
+
+                    # Match sequence lengths (content encoder downsamples audio)
+                    min_len = min(reconstructed.shape[1], target_mel.shape[1])
+                    reconstructed = reconstructed[:, :min_len, :]
+                    target_mel = target_mel[:, :min_len, :]
 
                     # Compute loss
-                    loss = criterion(reconstructed, mel)
+                    loss = criterion(reconstructed, target_mel)
 
                     # Backward pass
                     loss.backward()
@@ -350,6 +369,7 @@ class ModelTrainer:
                 if (epoch + 1) % config.checkpoint_interval == 0:
                     self._save_checkpoint(
                         model_dir,
+                        content_encoder,
                         speaker_encoder,
                         decoder,
                         epoch + 1,
@@ -385,6 +405,7 @@ class ModelTrainer:
         # Save model
         self._save_model(
             model_dir,
+            content_encoder,
             speaker_encoder,
             decoder,
             speaker_embedding,
@@ -512,6 +533,7 @@ class ModelTrainer:
     def _save_model(
         self,
         model_dir: Path,
+        content_encoder: ContentEncoder,
         speaker_encoder: SpeakerEncoder,
         decoder: VoiceDecoder,
         speaker_embedding: np.ndarray,
@@ -520,6 +542,7 @@ class ModelTrainer:
     ):
         """Save model to disk."""
         # Save model weights
+        torch.save(content_encoder.state_dict(), model_dir / "content_encoder.pt")
         torch.save(speaker_encoder.state_dict(), model_dir / "speaker_encoder.pt")
         torch.save(decoder.state_dict(), model_dir / "decoder.pt")
 
@@ -555,6 +578,7 @@ class ModelTrainer:
     def _save_checkpoint(
         self,
         model_dir: Path,
+        content_encoder: ContentEncoder,
         speaker_encoder: SpeakerEncoder,
         decoder: VoiceDecoder,
         epoch: int,
@@ -566,6 +590,7 @@ class ModelTrainer:
         torch.save(
             {
                 "epoch": epoch,
+                "content_encoder": content_encoder.state_dict(),
                 "speaker_encoder": speaker_encoder.state_dict(),
                 "decoder": decoder.state_dict(),
             },
@@ -575,11 +600,15 @@ class ModelTrainer:
     def _load_model(
         self,
         model_dir: Path,
-    ) -> Tuple[SpeakerEncoder, VoiceDecoder]:
+    ) -> Tuple[ContentEncoder, SpeakerEncoder, VoiceDecoder]:
         """Load model from disk."""
-        speaker_encoder = SpeakerEncoder().to(self.device)
-        decoder = VoiceDecoder().to(self.device)
+        content_encoder = ContentEncoder().to(self.device)
+        speaker_encoder = SpeakerEncoder(input_dim=self.settings.n_mels).to(self.device)
+        decoder = VoiceDecoder(n_mels=self.settings.n_mels).to(self.device)
 
+        content_encoder.load_state_dict(
+            torch.load(model_dir / "content_encoder.pt", map_location=self.device)
+        )
         speaker_encoder.load_state_dict(
             torch.load(model_dir / "speaker_encoder.pt", map_location=self.device)
         )
@@ -587,7 +616,7 @@ class ModelTrainer:
             torch.load(model_dir / "decoder.pt", map_location=self.device)
         )
 
-        return speaker_encoder, decoder
+        return content_encoder, speaker_encoder, decoder
 
     def _load_metadata(self, model_dir: Path) -> Dict:
         """Load model metadata."""
@@ -612,7 +641,7 @@ class ModelTrainer:
         if not archive_dir.exists():
             archive_dir.mkdir()
 
-            for file in ["speaker_encoder.pt", "decoder.pt", "metadata.json"]:
+            for file in ["content_encoder.pt", "speaker_encoder.pt", "decoder.pt", "metadata.json"]:
                 src = model_dir / file
                 if src.exists():
                     shutil.copy(src, archive_dir / file)
