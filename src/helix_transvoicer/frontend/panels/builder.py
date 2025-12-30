@@ -88,7 +88,6 @@ class BuilderPanel(ctk.CTkFrame):
         self.train_btn = ctk.CTkButton(
             side_frame,
             text="▶ START TRAINING",
-            font=HelixTheme.FONTS["button"],
             height=50,
             **HelixTheme.get_button_style("primary"),
             command=self._on_train,

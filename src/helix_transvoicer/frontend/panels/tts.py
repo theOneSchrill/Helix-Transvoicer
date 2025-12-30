@@ -94,7 +94,6 @@ class TTSPanel(ctk.CTkFrame):
         self.synth_btn = ctk.CTkButton(
             side_frame,
             text="▶ SYNTHESIZE",
-            font=HelixTheme.FONTS["button"],
             height=50,
             **HelixTheme.get_button_style("primary"),
             command=self._on_synthesize,
