@@ -353,6 +353,12 @@ class ModelTrainer:
         logger.info(f"Starting training for model: {config.model_name}")
         logger.info(f"Samples: {len(samples)}, Epochs: {config.epochs}")
 
+        # Clear GPU memory before training
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            logger.info("Cleared GPU memory cache")
+
         # Create model directory
         model_dir = self.models_dir / config.model_name
         model_dir.mkdir(parents=True, exist_ok=True)
@@ -361,7 +367,7 @@ class ModelTrainer:
         dataset = VoiceDataset(samples, augment=config.augment_data)
         dataloader = DataLoader(
             dataset,
-            batch_size=min(config.batch_size, len(samples)),
+            batch_size=min(config.batch_size, len(dataset)),  # Use dataset length, not samples
             shuffle=True,
             num_workers=0,
             pin_memory=self.device.type == "cuda",
@@ -514,6 +520,9 @@ class ModelTrainer:
 
         finally:
             self._current_training = None
+            # Clear GPU memory after training
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
 
         # Compute speaker embedding from all samples
         speaker_embedding = self._compute_speaker_embedding(
