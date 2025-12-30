@@ -463,7 +463,7 @@ class VoiceConverter:
     def _merge_chunks_with_crossfade(
         self,
         chunks: List[np.ndarray],
-        overlap: int,
+        overlap_samples: int,
         sr: int,
     ) -> np.ndarray:
         """Merge audio chunks with crossfade to avoid clicks."""
@@ -473,34 +473,36 @@ class VoiceConverter:
         if len(chunks) == 1:
             return chunks[0]
 
-        # Calculate total length
-        total_length = sum(len(c) for c in chunks) - overlap * (len(chunks) - 1)
-        result = np.zeros(total_length)
+        # Use a fixed crossfade duration (20ms) regardless of input overlap
+        # This is safer since vocoder output length may differ from input
+        crossfade_samples = min(int(sr * 0.02), min(len(c) // 4 for c in chunks))
 
-        pos = 0
-        for i, chunk in enumerate(chunks):
-            if i == 0:
-                # First chunk: no fade in
-                end_pos = len(chunk) - overlap
-                result[:end_pos] = chunk[:end_pos]
-                # Crossfade region
-                fade_out = np.linspace(1, 0, overlap)
-                result[end_pos:end_pos + overlap] = chunk[-overlap:] * fade_out
-                pos = end_pos
-            elif i == len(chunks) - 1:
-                # Last chunk: fade in only
-                fade_in = np.linspace(0, 1, overlap)
-                result[pos:pos + overlap] += chunk[:overlap] * fade_in
-                result[pos + overlap:pos + len(chunk) - overlap] = chunk[overlap:]
+        if crossfade_samples < 10:
+            # Too short for crossfade, just concatenate
+            return np.concatenate(chunks)
+
+        # Build result by concatenating with crossfade
+        result = chunks[0].copy()
+
+        for i in range(1, len(chunks)):
+            chunk = chunks[i]
+
+            # Ensure we have enough samples for crossfade
+            fade_len = min(crossfade_samples, len(result), len(chunk))
+
+            if fade_len < 10:
+                # Just concatenate
+                result = np.concatenate([result, chunk])
             else:
-                # Middle chunk: fade in and fade out
-                fade_in = np.linspace(0, 1, overlap)
-                result[pos:pos + overlap] += chunk[:overlap] * fade_in
-                end_pos = pos + len(chunk) - overlap
-                result[pos + overlap:end_pos] = chunk[overlap:-overlap]
-                fade_out = np.linspace(1, 0, overlap)
-                result[end_pos:end_pos + overlap] = chunk[-overlap:] * fade_out
-                pos = end_pos
+                # Create crossfade
+                fade_out = np.linspace(1, 0, fade_len)
+                fade_in = np.linspace(0, 1, fade_len)
+
+                # Blend the overlapping region
+                blended = result[-fade_len:] * fade_out + chunk[:fade_len] * fade_in
+
+                # Build new result: everything before fade + blended + rest of chunk
+                result = np.concatenate([result[:-fade_len], blended, chunk[fade_len:]])
 
         return result
 
