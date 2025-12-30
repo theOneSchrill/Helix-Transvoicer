@@ -312,6 +312,12 @@ class ModelTrainer:
                         f"({removed_pct:.0f}% silence removed)")
             logger.info(f"Created {len(samples)} training samples from {len(audio_paths)} files")
 
+        # Free emotion analyzer GPU memory before training
+        del self.emotion_analyzer
+        self.emotion_analyzer = None
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+
         return samples
 
     def train(
@@ -400,6 +406,12 @@ class ModelTrainer:
         # Loss function
         criterion = nn.MSELoss()
 
+        # Mixed precision training for memory efficiency (halves GPU memory usage)
+        use_amp = self.device.type == "cuda"
+        scaler = torch.cuda.amp.GradScaler() if use_amp else None
+        if use_amp:
+            logger.info("Using mixed precision training (float16)")
+
         # Training loop
         final_loss = 0.0
         self._current_training = {"active": True}
@@ -431,29 +443,36 @@ class ModelTrainer:
 
                     optimizer.zero_grad()
 
-                    # Extract content features from audio
-                    content_features = content_encoder(audio)  # [batch, time, 256]
+                    # Use automatic mixed precision for forward pass
+                    with torch.cuda.amp.autocast(enabled=use_amp):
+                        # Extract content features from audio
+                        content_features = content_encoder(audio)  # [batch, time, 256]
 
-                    # Extract speaker embedding from mel
-                    speaker_embedding = speaker_encoder(mel)  # [batch, 256]
+                        # Extract speaker embedding from mel
+                        speaker_embedding = speaker_encoder(mel)  # [batch, 256]
 
-                    # Decode to mel spectrogram
-                    reconstructed = decoder(content_features, speaker_embedding)  # [batch, time, n_mels]
+                        # Decode to mel spectrogram
+                        reconstructed = decoder(content_features, speaker_embedding)  # [batch, time, n_mels]
 
-                    # Target mel needs to match reconstructed shape [batch, time, n_mels]
-                    target_mel = mel.transpose(1, 2)  # [batch, time, n_mels]
+                        # Target mel needs to match reconstructed shape [batch, time, n_mels]
+                        target_mel = mel.transpose(1, 2)  # [batch, time, n_mels]
 
-                    # Match sequence lengths (content encoder downsamples audio)
-                    min_len = min(reconstructed.shape[1], target_mel.shape[1])
-                    reconstructed = reconstructed[:, :min_len, :]
-                    target_mel = target_mel[:, :min_len, :]
+                        # Match sequence lengths (content encoder downsamples audio)
+                        min_len = min(reconstructed.shape[1], target_mel.shape[1])
+                        reconstructed = reconstructed[:, :min_len, :]
+                        target_mel = target_mel[:, :min_len, :]
 
-                    # Compute loss
-                    loss = criterion(reconstructed, target_mel)
+                        # Compute loss
+                        loss = criterion(reconstructed, target_mel)
 
-                    # Backward pass
-                    loss.backward()
-                    optimizer.step()
+                    # Backward pass with gradient scaling for mixed precision
+                    if scaler is not None:
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        loss.backward()
+                        optimizer.step()
 
                     epoch_loss += loss.item()
 
