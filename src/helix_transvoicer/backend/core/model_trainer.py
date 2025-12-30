@@ -588,6 +588,7 @@ class ModelTrainer:
             speaker_embedding,
             config,
             samples,
+            low_memory_mode=low_memory_mode,
         )
 
         # Compute emotion coverage
@@ -716,6 +717,7 @@ class ModelTrainer:
         speaker_embedding: np.ndarray,
         config: TrainingConfig,
         samples: List[TrainingSample],
+        low_memory_mode: bool = False,
     ):
         """Save model to disk."""
         # Save model weights
@@ -726,7 +728,7 @@ class ModelTrainer:
         # Save speaker embedding
         np.save(model_dir / "speaker_embedding.npy", speaker_embedding)
 
-        # Save config
+        # Save training config
         with open(model_dir / "config.json", "w") as f:
             json.dump(
                 {
@@ -738,6 +740,25 @@ class ModelTrainer:
                 indent=2,
             )
 
+        # Save model architecture config (critical for loading correctly)
+        if low_memory_mode:
+            arch_config = {
+                "low_memory_mode": True,
+                "content_encoder": {"hidden_dim": 64, "output_dim": 64, "num_layers": 1},
+                "speaker_encoder": {"hidden_dim": 64, "embedding_dim": 64},
+                "decoder": {"content_dim": 64, "speaker_dim": 64, "hidden_dim": 128, "num_layers": 1},
+            }
+        else:
+            arch_config = {
+                "low_memory_mode": False,
+                "content_encoder": {"hidden_dim": 256, "output_dim": 256, "num_layers": 3},
+                "speaker_encoder": {"hidden_dim": 256, "embedding_dim": 256},
+                "decoder": {"content_dim": 256, "speaker_dim": 256, "hidden_dim": 512, "num_layers": 3},
+            }
+
+        with open(model_dir / "architecture.json", "w") as f:
+            json.dump(arch_config, f, indent=2)
+
         # Save metadata
         metadata = {
             "model_id": config.model_name,
@@ -747,6 +768,7 @@ class ModelTrainer:
             "total_samples": len(samples),
             "total_duration": sum(s.duration for s in samples),
             "emotion_coverage": self._compute_emotion_coverage(samples),
+            "low_memory_mode": low_memory_mode,
         }
 
         with open(model_dir / "metadata.json", "w") as f:
@@ -779,9 +801,39 @@ class ModelTrainer:
         model_dir: Path,
     ) -> Tuple[ContentEncoder, SpeakerEncoder, VoiceDecoder]:
         """Load model from disk."""
-        content_encoder = ContentEncoder().to(self.device)
-        speaker_encoder = SpeakerEncoder(input_dim=self.settings.n_mels).to(self.device)
-        decoder = VoiceDecoder(n_mels=self.settings.n_mels).to(self.device)
+        # Load architecture config to create model with correct dimensions
+        arch_config = self._load_architecture_config(model_dir)
+
+        if arch_config and arch_config.get("low_memory_mode", False):
+            # Create low memory mode models
+            ce_cfg = arch_config.get("content_encoder", {})
+            se_cfg = arch_config.get("speaker_encoder", {})
+            dec_cfg = arch_config.get("decoder", {})
+
+            content_encoder = ContentEncoder(
+                hidden_dim=ce_cfg.get("hidden_dim", 64),
+                output_dim=ce_cfg.get("output_dim", 64),
+                num_layers=ce_cfg.get("num_layers", 1),
+            ).to(self.device)
+
+            speaker_encoder = SpeakerEncoder(
+                input_dim=self.settings.n_mels,
+                hidden_dim=se_cfg.get("hidden_dim", 64),
+                embedding_dim=se_cfg.get("embedding_dim", 64),
+            ).to(self.device)
+
+            decoder = VoiceDecoder(
+                content_dim=dec_cfg.get("content_dim", 64),
+                speaker_dim=dec_cfg.get("speaker_dim", 64),
+                hidden_dim=dec_cfg.get("hidden_dim", 128),
+                n_mels=self.settings.n_mels,
+                num_layers=dec_cfg.get("num_layers", 1),
+            ).to(self.device)
+        else:
+            # Create default models
+            content_encoder = ContentEncoder().to(self.device)
+            speaker_encoder = SpeakerEncoder(input_dim=self.settings.n_mels).to(self.device)
+            decoder = VoiceDecoder(n_mels=self.settings.n_mels).to(self.device)
 
         content_encoder.load_state_dict(
             torch.load(model_dir / "content_encoder.pt", map_location=self.device)
@@ -794,6 +846,14 @@ class ModelTrainer:
         )
 
         return content_encoder, speaker_encoder, decoder
+
+    def _load_architecture_config(self, model_dir: Path) -> Optional[Dict]:
+        """Load model architecture configuration."""
+        arch_path = model_dir / "architecture.json"
+        if arch_path.exists():
+            with open(arch_path, "r") as f:
+                return json.load(f)
+        return None
 
     def _load_metadata(self, model_dir: Path) -> Dict:
         """Load model metadata."""

@@ -172,6 +172,10 @@ class ModelManager:
             raise ValueError(f"Model not found: {model_id}")
 
         loaded = {}
+        settings = get_settings()
+
+        # Load architecture config to create models with correct dimensions
+        arch_config = self._load_architecture_config(model.path)
 
         # Load speaker embedding
         embedding_path = model.path / "speaker_embedding.npy"
@@ -179,12 +183,21 @@ class ModelManager:
             embedding = np.load(str(embedding_path))
             loaded["speaker_embedding"] = torch.from_numpy(embedding).to(self.device)
 
-        # Load encoder
+        # Load encoder with correct architecture
         encoder_path = model.path / "speaker_encoder.pt"
         if encoder_path.exists():
             from helix_transvoicer.backend.models.encoder import SpeakerEncoder
 
-            encoder = SpeakerEncoder()
+            if arch_config and arch_config.get("low_memory_mode", False):
+                se_cfg = arch_config.get("speaker_encoder", {})
+                encoder = SpeakerEncoder(
+                    input_dim=settings.n_mels,
+                    hidden_dim=se_cfg.get("hidden_dim", 64),
+                    embedding_dim=se_cfg.get("embedding_dim", 64),
+                )
+            else:
+                encoder = SpeakerEncoder(input_dim=settings.n_mels)
+
             encoder.load_state_dict(
                 torch.load(str(encoder_path), map_location=self.device)
             )
@@ -192,12 +205,23 @@ class ModelManager:
             encoder.eval()
             loaded["encoder"] = encoder
 
-        # Load decoder
+        # Load decoder with correct architecture
         decoder_path = model.path / "decoder.pt"
         if decoder_path.exists():
             from helix_transvoicer.backend.models.decoder import VoiceDecoder
 
-            decoder = VoiceDecoder()
+            if arch_config and arch_config.get("low_memory_mode", False):
+                dec_cfg = arch_config.get("decoder", {})
+                decoder = VoiceDecoder(
+                    content_dim=dec_cfg.get("content_dim", 64),
+                    speaker_dim=dec_cfg.get("speaker_dim", 64),
+                    hidden_dim=dec_cfg.get("hidden_dim", 128),
+                    n_mels=settings.n_mels,
+                    num_layers=dec_cfg.get("num_layers", 1),
+                )
+            else:
+                decoder = VoiceDecoder(n_mels=settings.n_mels)
+
             decoder.load_state_dict(
                 torch.load(str(decoder_path), map_location=self.device)
             )
@@ -210,6 +234,48 @@ class ModelManager:
 
         logger.info(f"Loaded model: {model_id}")
         return loaded
+
+    def _load_architecture_config(self, model_path: Path) -> Optional[Dict]:
+        """Load model architecture configuration."""
+        arch_path = model_path / "architecture.json"
+        if arch_path.exists():
+            with open(arch_path, "r") as f:
+                return json.load(f)
+
+        # Fallback: Try to infer from metadata or model weights
+        metadata_path = model_path / "metadata.json"
+        if metadata_path.exists():
+            with open(metadata_path, "r") as f:
+                metadata = json.load(f)
+                if metadata.get("low_memory_mode", False):
+                    # Return inferred low memory config
+                    return {
+                        "low_memory_mode": True,
+                        "content_encoder": {"hidden_dim": 64, "output_dim": 64, "num_layers": 1},
+                        "speaker_encoder": {"hidden_dim": 64, "embedding_dim": 64},
+                        "decoder": {"content_dim": 64, "speaker_dim": 64, "hidden_dim": 128, "num_layers": 1},
+                    }
+
+        # Try to infer from model weights
+        encoder_path = model_path / "speaker_encoder.pt"
+        if encoder_path.exists():
+            try:
+                state_dict = torch.load(str(encoder_path), map_location="cpu")
+                # Check embedding projection output size to detect low memory mode
+                if "embedding_proj.0.weight" in state_dict:
+                    proj_size = state_dict["embedding_proj.0.weight"].shape[0]
+                    if proj_size == 64:
+                        logger.info(f"Detected low memory mode model (embedding_dim=64)")
+                        return {
+                            "low_memory_mode": True,
+                            "content_encoder": {"hidden_dim": 64, "output_dim": 64, "num_layers": 1},
+                            "speaker_encoder": {"hidden_dim": 64, "embedding_dim": 64},
+                            "decoder": {"content_dim": 64, "speaker_dim": 64, "hidden_dim": 128, "num_layers": 1},
+                        }
+            except Exception as e:
+                logger.warning(f"Could not infer architecture from weights: {e}")
+
+        return None
 
     async def unload_model(self, model_id: str) -> None:
         """Unload model from memory."""
