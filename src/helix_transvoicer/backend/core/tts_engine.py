@@ -341,8 +341,18 @@ class AcousticModel(nn.Module):
         expanded = self._expand_by_duration(x, durations.round().long())
 
         # Project speaker and emotion embeddings
-        speaker = self.speaker_projection(speaker_embedding)
-        emotion = self.emotion_projection(emotion_embedding)
+        # Squeeze to 2D [batch, dim] if needed, then project
+        speaker_emb = speaker_embedding.squeeze() if speaker_embedding.dim() > 2 else speaker_embedding
+        emotion_emb = emotion_embedding.squeeze() if emotion_embedding.dim() > 2 else emotion_embedding
+
+        # Ensure batch dimension exists
+        if speaker_emb.dim() == 1:
+            speaker_emb = speaker_emb.unsqueeze(0)
+        if emotion_emb.dim() == 1:
+            emotion_emb = emotion_emb.unsqueeze(0)
+
+        speaker = self.speaker_projection(speaker_emb)
+        emotion = self.emotion_projection(emotion_emb)
 
         # Broadcast to match expanded sequence length
         batch_size, seq_len, _ = expanded.shape
