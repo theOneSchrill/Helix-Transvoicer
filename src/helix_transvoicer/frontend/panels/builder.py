@@ -378,9 +378,11 @@ class BuilderPanel(ctk.CTkFrame):
         """Start training."""
         model_name = self.name_entry.get().strip()
         if not model_name:
+            self.progress.set_error("Enter a model name")
             return
 
-        if len(self._samples) < 3:
+        if len(self._samples) < 1:
+            self.progress.set_error("Add at least 1 audio sample")
             return
 
         self.progress.reset()
