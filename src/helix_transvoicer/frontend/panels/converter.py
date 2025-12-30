@@ -88,7 +88,6 @@ class ConverterPanel(ctk.CTkFrame):
         self.convert_btn = ctk.CTkButton(
             side_frame,
             text="▶ CONVERT",
-            font=HelixTheme.FONTS["button"],
             height=50,
             **HelixTheme.get_button_style("primary"),
             command=self._on_convert,
