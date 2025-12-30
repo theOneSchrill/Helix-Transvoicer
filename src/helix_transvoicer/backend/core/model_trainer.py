@@ -238,7 +238,7 @@ class ModelTrainer:
 
         start_time = time.time()
 
-        if len(samples) < 3:
+        if len(samples) < 1:
             return TrainingResult(
                 model_id=config.model_name,
                 version="0.0.0",
@@ -250,7 +250,7 @@ class ModelTrainer:
                 emotion_coverage={},
                 training_time=0,
                 success=False,
-                error="At least 3 training samples required",
+                error="At least 1 training sample required",
             )
 
         logger.info(f"Starting training for model: {config.model_name}")

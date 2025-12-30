@@ -70,7 +70,7 @@ class EmotionClassifier(nn.Module):
 
     def __init__(
         self,
-        input_dim: int = 40,  # MFCCs
+        input_dim: int = 120,  # MFCCs (40) + delta (40) + delta-delta (40)
         hidden_dim: int = 256,
         num_emotions: int = len(EMOTIONS),
     ):

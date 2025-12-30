@@ -2,6 +2,7 @@
 Helix Transvoicer - Model Builder Panel.
 """
 
+import threading
 import customtkinter as ctk
 from pathlib import Path
 from tkinter import filedialog
@@ -389,18 +390,29 @@ class BuilderPanel(ctk.CTkFrame):
         self.progress.set_stage("Starting training...")
         self.train_btn.configure(state="disabled")
 
-        try:
-            result = self.api_client.train_model(
-                model_name,
-                self._samples,
-                epochs=int(self.epochs_slider.get()),
-                batch_size=int(self.batch_slider.get()),
-            )
+        # Run training in background thread to avoid GUI freeze
+        def train_thread():
+            try:
+                result = self.api_client.train_model(
+                    model_name,
+                    self._samples,
+                    epochs=int(self.epochs_slider.get()),
+                    batch_size=int(self.batch_slider.get()),
+                )
+                # Update UI from main thread
+                self.after(0, self._on_train_complete, result)
+            except Exception as e:
+                self.after(0, self._on_train_error, str(e))
 
-            self.progress.set_complete()
+        thread = threading.Thread(target=train_thread, daemon=True)
+        thread.start()
 
-        except Exception as e:
-            self.progress.set_error(str(e)[:50])
+    def _on_train_complete(self, result):
+        """Handle training completion (called from main thread)."""
+        self.progress.set_complete()
+        self.train_btn.configure(state="normal")
 
-        finally:
-            self.train_btn.configure(state="normal")
+    def _on_train_error(self, error_msg: str):
+        """Handle training error (called from main thread)."""
+        self.progress.set_error(error_msg[:50])
+        self.train_btn.configure(state="normal")
