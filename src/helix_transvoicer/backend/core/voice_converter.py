@@ -1,7 +1,8 @@
 """
 Helix Transvoicer - Voice conversion pipeline.
 
-Converts source audio to target voice while preserving content and timing.
+Converts source audio to target voice using signal processing.
+Uses pitch shifting and formant modification for voice transformation.
 """
 
 import gc
@@ -9,27 +10,18 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Union
+import time
 
+import librosa
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import scipy.signal as signal
 
-from helix_transvoicer.backend.core.audio_processor import AudioProcessor, ProcessingConfig
-from helix_transvoicer.backend.models.encoder import ContentEncoder, SpeakerEncoder
-from helix_transvoicer.backend.models.decoder import VoiceDecoder
-from helix_transvoicer.backend.models.vocoder import Vocoder
+from helix_transvoicer.backend.core.audio_processor import AudioProcessor
 from helix_transvoicer.backend.utils.audio import AudioUtils
 from helix_transvoicer.backend.utils.config import get_settings
 
 logger = logging.getLogger("helix.voice_converter")
-
-# Maximum chunk size in samples for 8GB GPUs (about 3 seconds at 22050 Hz)
-MAX_CHUNK_SAMPLES = 22050 * 3
-
-# Low memory threshold in GB - use chunked processing below this
-LOW_MEMORY_THRESHOLD_GB = 10.0
 
 
 @dataclass
@@ -59,192 +51,40 @@ class ConversionResult:
     metadata: Dict = field(default_factory=dict)
 
 
+@dataclass
+class VoiceCharacteristics:
+    """Voice characteristics extracted from training samples."""
+    pitch_mean: float = 150.0  # Hz
+    pitch_std: float = 50.0
+    pitch_min: float = 80.0
+    pitch_max: float = 300.0
+    formant_shift: float = 0.0  # relative shift
+
+
 class VoiceConverter:
     """
-    Voice conversion engine.
+    Voice conversion engine using signal processing.
 
     Pipeline:
-    1. Preprocess source audio
-    2. Extract content features (PPG-like representation)
-    3. Extract/load target speaker embedding
-    4. Decode to target voice
-    5. Vocode to waveform
+    1. Load and preprocess source audio
+    2. Analyze source pitch characteristics
+    3. Load target voice characteristics
+    4. Apply pitch shift to match target
+    5. Apply formant modification
+    6. Post-process and return
     """
 
     def __init__(
         self,
-        device: Optional[torch.device] = None,
+        device=None,  # Kept for API compatibility
         models_dir: Optional[Path] = None,
     ):
         self.settings = get_settings()
-        self.device = device or torch.device("cpu")
         self.models_dir = models_dir or self.settings.models_dir
-
         self.audio_processor = AudioProcessor()
 
-        # Initialize models (lazy loading)
-        self._content_encoder: Optional[ContentEncoder] = None
-        self._speaker_encoder: Optional[SpeakerEncoder] = None
-        self._decoder: Optional[VoiceDecoder] = None
-        self._vocoder: Optional[Vocoder] = None
-
-        # Cache for loaded speaker embeddings
-        self._speaker_cache: Dict[str, torch.Tensor] = {}
-
-        # Architecture config cache (model_id -> config)
-        self._arch_cache: Dict[str, Dict] = {}
-
-        # Current architecture dimensions
-        self._current_content_dim: int = 256
-        self._current_speaker_dim: int = 256
-
-        # Check available GPU memory
-        self._low_memory_mode = self._check_low_memory()
-
-    @property
-    def content_encoder(self) -> ContentEncoder:
-        """Lazy-load content encoder."""
-        if self._content_encoder is None:
-            self._content_encoder = ContentEncoder().to(self.device)
-            self._content_encoder.eval()
-        return self._content_encoder
-
-    @property
-    def speaker_encoder(self) -> SpeakerEncoder:
-        """Lazy-load speaker encoder."""
-        if self._speaker_encoder is None:
-            self._speaker_encoder = SpeakerEncoder().to(self.device)
-            self._speaker_encoder.eval()
-        return self._speaker_encoder
-
-    @property
-    def decoder(self) -> VoiceDecoder:
-        """Lazy-load voice decoder."""
-        if self._decoder is None:
-            self._decoder = VoiceDecoder().to(self.device)
-            self._decoder.eval()
-        return self._decoder
-
-    @property
-    def vocoder(self) -> Vocoder:
-        """Lazy-load vocoder."""
-        if self._vocoder is None:
-            self._vocoder = Vocoder().to(self.device)
-            self._vocoder.eval()
-        return self._vocoder
-
-    def _check_low_memory(self) -> bool:
-        """Check if we're running in low memory mode."""
-        if not torch.cuda.is_available():
-            return False
-        try:
-            total_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            return total_memory < LOW_MEMORY_THRESHOLD_GB
-        except Exception:
-            return False
-
-    def _clear_gpu_memory(self):
-        """Clear GPU memory cache."""
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            gc.collect()
-
-    def _load_architecture_config(self, model_id: str) -> Optional[Dict]:
-        """Load architecture config for a model."""
-        if model_id in self._arch_cache:
-            return self._arch_cache[model_id]
-
-        model_path = self.models_dir / model_id
-
-        # Try architecture.json first
-        arch_path = model_path / "architecture.json"
-        if arch_path.exists():
-            try:
-                with open(arch_path, "r") as f:
-                    config = json.load(f)
-                    self._arch_cache[model_id] = config
-                    logger.info(f"Loaded architecture config for {model_id}")
-                    return config
-            except Exception as e:
-                logger.warning(f"Failed to load architecture.json: {e}")
-
-        # Fallback: Try to infer from speaker embedding
-        embedding_path = model_path / "speaker_embedding.npy"
-        if embedding_path.exists():
-            try:
-                embedding = np.load(str(embedding_path))
-                embed_dim = embedding.shape[-1]
-
-                # Infer if low memory mode based on embedding dimension
-                if embed_dim == 64:
-                    config = {
-                        "low_memory_mode": True,
-                        "content_encoder": {"hidden_dim": 64, "output_dim": 64, "num_layers": 1},
-                        "speaker_encoder": {"hidden_dim": 64, "embedding_dim": 64},
-                        "decoder": {"content_dim": 64, "speaker_dim": 64, "hidden_dim": 128, "num_layers": 1},
-                    }
-                    self._arch_cache[model_id] = config
-                    logger.info(f"Inferred low_memory architecture from embedding dim={embed_dim}")
-                    return config
-            except Exception as e:
-                logger.warning(f"Failed to infer architecture from embedding: {e}")
-
-        return None
-
-    def _get_content_encoder(self, arch_config: Optional[Dict] = None) -> ContentEncoder:
-        """Get or create content encoder with correct architecture."""
-        if arch_config and arch_config.get("low_memory_mode"):
-            enc_config = arch_config.get("content_encoder", {})
-            hidden_dim = enc_config.get("hidden_dim", 64)
-            output_dim = enc_config.get("output_dim", 64)
-            num_layers = enc_config.get("num_layers", 1)
-
-            # Check if we need to recreate with different dimensions
-            if (self._content_encoder is None or
-                self._current_content_dim != output_dim):
-                logger.info(f"Creating ContentEncoder with hidden_dim={hidden_dim}, output_dim={output_dim}")
-                self._content_encoder = ContentEncoder(
-                    hidden_dim=hidden_dim,
-                    output_dim=output_dim,
-                    num_layers=num_layers
-                ).to(self.device)
-                self._content_encoder.eval()
-                self._current_content_dim = output_dim
-        else:
-            if self._content_encoder is None or self._current_content_dim != 256:
-                self._content_encoder = ContentEncoder().to(self.device)
-                self._content_encoder.eval()
-                self._current_content_dim = 256
-
-        return self._content_encoder
-
-    def _get_decoder(self, arch_config: Optional[Dict] = None) -> VoiceDecoder:
-        """Get or create decoder with correct architecture."""
-        if arch_config and arch_config.get("low_memory_mode"):
-            dec_config = arch_config.get("decoder", {})
-            content_dim = dec_config.get("content_dim", 64)
-            speaker_dim = dec_config.get("speaker_dim", 64)
-            hidden_dim = dec_config.get("hidden_dim", 128)
-            num_layers = dec_config.get("num_layers", 1)
-
-            if (self._decoder is None or
-                self._current_speaker_dim != speaker_dim):
-                logger.info(f"Creating VoiceDecoder with content_dim={content_dim}, speaker_dim={speaker_dim}")
-                self._decoder = VoiceDecoder(
-                    content_dim=content_dim,
-                    speaker_dim=speaker_dim,
-                    hidden_dim=hidden_dim,
-                    num_layers=num_layers
-                ).to(self.device)
-                self._decoder.eval()
-                self._current_speaker_dim = speaker_dim
-        else:
-            if self._decoder is None or self._current_speaker_dim != 256:
-                self._decoder = VoiceDecoder().to(self.device)
-                self._decoder.eval()
-                self._current_speaker_dim = 256
-
-        return self._decoder
+        # Cache for voice characteristics
+        self._voice_cache: Dict[str, VoiceCharacteristics] = {}
 
     def convert(
         self,
@@ -265,8 +105,6 @@ class VoiceConverter:
         Returns:
             ConversionResult with converted audio
         """
-        import time
-
         start_time = time.time()
         cfg = config or ConversionConfig()
 
@@ -276,14 +114,6 @@ class VoiceConverter:
 
         update_progress("Loading audio", 0.0)
 
-        # Clear GPU memory before starting
-        self._clear_gpu_memory()
-
-        # Load architecture config for target model
-        arch_config = self._load_architecture_config(target_model_id)
-        if arch_config:
-            logger.info(f"Using architecture config for {target_model_id}: low_memory={arch_config.get('low_memory_mode', False)}")
-
         # Load and preprocess source audio
         if isinstance(source_audio, (str, Path)):
             processed = self.audio_processor.process(source_audio)
@@ -291,40 +121,56 @@ class VoiceConverter:
             sr = processed.sample_rate
             source_duration = processed.original_duration
         else:
-            audio = source_audio
+            audio = source_audio.astype(np.float32)
             sr = self.settings.sample_rate
             source_duration = len(audio) / sr
 
-        update_progress("Loading voice model", 0.2)
+        update_progress("Analyzing voice", 0.2)
 
-        # Get target speaker embedding
-        speaker_embedding = self._get_speaker_embedding(target_model_id)
+        # Analyze source pitch
+        source_pitch = self._analyze_pitch(audio, sr)
+        logger.info(f"Source pitch: mean={source_pitch.pitch_mean:.1f}Hz")
 
-        # Get correctly configured encoder and decoder
-        content_encoder = self._get_content_encoder(arch_config)
-        decoder = self._get_decoder(arch_config)
+        update_progress("Loading voice model", 0.3)
 
-        update_progress("Extracting features", 0.3)
+        # Load target voice characteristics
+        target_voice = self._load_voice_characteristics(target_model_id)
+        logger.info(f"Target pitch: mean={target_voice.pitch_mean:.1f}Hz")
 
-        # Determine if we need chunked processing
-        use_chunked = self._low_memory_mode or len(audio) > MAX_CHUNK_SAMPLES
+        update_progress("Converting voice", 0.4)
 
-        if use_chunked:
-            logger.info(f"Using chunked processing (audio length: {len(audio)}, max chunk: {MAX_CHUNK_SAMPLES})")
-            audio_output = self._convert_chunked(
-                audio, sr, speaker_embedding, content_encoder, decoder,
-                cfg, arch_config, update_progress
+        # Calculate pitch shift needed
+        if source_pitch.pitch_mean > 0 and target_voice.pitch_mean > 0:
+            # Calculate semitones shift to match target pitch
+            pitch_ratio = target_voice.pitch_mean / source_pitch.pitch_mean
+            auto_pitch_shift = 12 * np.log2(pitch_ratio)
+        else:
+            auto_pitch_shift = 0.0
+
+        # Combine with user-specified pitch shift
+        total_pitch_shift = auto_pitch_shift + cfg.pitch_shift
+        logger.info(f"Pitch shift: auto={auto_pitch_shift:.1f}, user={cfg.pitch_shift}, total={total_pitch_shift:.1f} semitones")
+
+        # Apply pitch shift using librosa
+        if abs(total_pitch_shift) > 0.1:
+            audio_output = librosa.effects.pitch_shift(
+                audio,
+                sr=sr,
+                n_steps=total_pitch_shift,
             )
         else:
-            # Process entire audio at once
-            audio_output = self._convert_single(
-                audio, sr, speaker_embedding, content_encoder, decoder,
-                cfg, update_progress
-            )
+            audio_output = audio.copy()
 
-        update_progress("Post-processing", 0.9)
+        update_progress("Applying formant shift", 0.6)
 
-        # Apply smoothing
+        # Apply formant shift if specified
+        total_formant_shift = target_voice.formant_shift + cfg.formant_shift
+        if abs(total_formant_shift) > 0.05:
+            audio_output = self._apply_formant_shift(audio_output, sr, total_formant_shift)
+
+        update_progress("Post-processing", 0.8)
+
+        # Apply smoothing if needed
         if cfg.smoothing > 0:
             audio_output = self._apply_smoothing(audio_output, cfg.smoothing)
 
@@ -332,16 +178,9 @@ class VoiceConverter:
         if cfg.normalize_output:
             audio_output = AudioUtils.normalize(audio_output)
 
-        # Apply crossfade at segment boundaries
+        # Apply fade in/out
         if cfg.crossfade_ms > 0:
-            audio_output = self._apply_crossfade(
-                audio_output,
-                sr,
-                cfg.crossfade_ms,
-            )
-
-        # Clear GPU memory after processing
-        self._clear_gpu_memory()
+            audio_output = self._apply_crossfade(audio_output, sr, cfg.crossfade_ms)
 
         processing_time = time.time() - start_time
 
@@ -356,197 +195,172 @@ class VoiceConverter:
             config=cfg,
             processing_time=processing_time,
             metadata={
-                "device": str(self.device),
-                "chunked_processing": use_chunked,
-                "low_memory_mode": arch_config.get("low_memory_mode", False) if arch_config else False,
+                "source_pitch_mean": source_pitch.pitch_mean,
+                "target_pitch_mean": target_voice.pitch_mean,
+                "pitch_shift_semitones": total_pitch_shift,
+                "formant_shift": total_formant_shift,
             },
         )
 
-    def _convert_single(
+    def _analyze_pitch(self, audio: np.ndarray, sr: int) -> VoiceCharacteristics:
+        """Analyze pitch characteristics of audio."""
+        try:
+            # Extract pitch using librosa
+            f0, voiced_flag, _ = librosa.pyin(
+                audio,
+                fmin=librosa.note_to_hz('C2'),
+                fmax=librosa.note_to_hz('C6'),
+                sr=sr,
+            )
+
+            # Filter to voiced frames only
+            voiced_f0 = f0[voiced_flag] if voiced_flag is not None else f0[~np.isnan(f0)]
+
+            if len(voiced_f0) > 0:
+                return VoiceCharacteristics(
+                    pitch_mean=float(np.nanmean(voiced_f0)),
+                    pitch_std=float(np.nanstd(voiced_f0)),
+                    pitch_min=float(np.nanmin(voiced_f0)),
+                    pitch_max=float(np.nanmax(voiced_f0)),
+                )
+        except Exception as e:
+            logger.warning(f"Pitch analysis failed: {e}")
+
+        # Return default if analysis fails
+        return VoiceCharacteristics()
+
+    def _load_voice_characteristics(self, model_id: str) -> VoiceCharacteristics:
+        """Load voice characteristics for a model."""
+        if model_id in self._voice_cache:
+            return self._voice_cache[model_id]
+
+        model_path = self.models_dir / model_id
+
+        # Try to load voice_characteristics.json
+        char_path = model_path / "voice_characteristics.json"
+        if char_path.exists():
+            try:
+                with open(char_path, "r") as f:
+                    data = json.load(f)
+                    chars = VoiceCharacteristics(
+                        pitch_mean=data.get("pitch_mean", 150.0),
+                        pitch_std=data.get("pitch_std", 50.0),
+                        pitch_min=data.get("pitch_min", 80.0),
+                        pitch_max=data.get("pitch_max", 300.0),
+                        formant_shift=data.get("formant_shift", 0.0),
+                    )
+                    self._voice_cache[model_id] = chars
+                    return chars
+            except Exception as e:
+                logger.warning(f"Failed to load voice characteristics: {e}")
+
+        # Try to analyze from training samples
+        samples_dir = model_path / "samples"
+        if samples_dir.exists():
+            chars = self._analyze_training_samples(samples_dir)
+            if chars:
+                # Save for future use
+                self._save_voice_characteristics(model_path, chars)
+                self._voice_cache[model_id] = chars
+                return chars
+
+        # Return defaults based on common voice types
+        logger.warning(f"No voice characteristics found for {model_id}, using defaults")
+        default_chars = VoiceCharacteristics()
+        self._voice_cache[model_id] = default_chars
+        return default_chars
+
+    def _analyze_training_samples(self, samples_dir: Path) -> Optional[VoiceCharacteristics]:
+        """Analyze training samples to extract voice characteristics."""
+        all_pitches = []
+
+        sample_files = list(samples_dir.glob("*.wav")) + list(samples_dir.glob("*.mp3"))
+
+        for sample_file in sample_files[:10]:  # Limit to first 10 samples
+            try:
+                audio, sr = librosa.load(str(sample_file), sr=22050)
+                f0, voiced_flag, _ = librosa.pyin(
+                    audio,
+                    fmin=librosa.note_to_hz('C2'),
+                    fmax=librosa.note_to_hz('C6'),
+                    sr=sr,
+                )
+                if voiced_flag is not None:
+                    voiced_f0 = f0[voiced_flag]
+                    all_pitches.extend(voiced_f0[~np.isnan(voiced_f0)])
+            except Exception as e:
+                logger.debug(f"Failed to analyze {sample_file}: {e}")
+
+        if all_pitches:
+            all_pitches = np.array(all_pitches)
+            return VoiceCharacteristics(
+                pitch_mean=float(np.mean(all_pitches)),
+                pitch_std=float(np.std(all_pitches)),
+                pitch_min=float(np.min(all_pitches)),
+                pitch_max=float(np.max(all_pitches)),
+            )
+
+        return None
+
+    def _save_voice_characteristics(self, model_path: Path, chars: VoiceCharacteristics):
+        """Save voice characteristics to file."""
+        char_path = model_path / "voice_characteristics.json"
+        try:
+            with open(char_path, "w") as f:
+                json.dump({
+                    "pitch_mean": chars.pitch_mean,
+                    "pitch_std": chars.pitch_std,
+                    "pitch_min": chars.pitch_min,
+                    "pitch_max": chars.pitch_max,
+                    "formant_shift": chars.formant_shift,
+                }, f, indent=2)
+            logger.info(f"Saved voice characteristics to {char_path}")
+        except Exception as e:
+            logger.warning(f"Failed to save voice characteristics: {e}")
+
+    def _apply_formant_shift(
         self,
         audio: np.ndarray,
         sr: int,
-        speaker_embedding: torch.Tensor,
-        content_encoder: ContentEncoder,
-        decoder: VoiceDecoder,
-        cfg: ConversionConfig,
-        update_progress: Callable[[str, float], None],
+        shift: float,
     ) -> np.ndarray:
-        """Convert audio in a single pass (for shorter audio or high-memory GPUs)."""
-        with torch.no_grad():
-            audio_tensor = torch.from_numpy(audio).float().unsqueeze(0).to(self.device)
-            content_features = content_encoder(audio_tensor)
+        """
+        Apply formant shift using resampling technique.
 
-            update_progress("Converting voice", 0.5)
+        Positive shift = higher formants (more feminine/childlike)
+        Negative shift = lower formants (more masculine/deeper)
+        """
+        if abs(shift) < 0.05:
+            return audio
 
-            # Apply pitch shift if specified
-            if cfg.pitch_shift != 0:
-                content_features = self._apply_pitch_shift(content_features, cfg.pitch_shift)
+        # Formant shift via resampling
+        # shift > 0: stretch time, then pitch up
+        # shift < 0: compress time, then pitch down
+        stretch_factor = 1.0 + shift * 0.3  # Limit the effect
 
-            # Decode to mel spectrogram
-            mel_output = decoder(content_features, speaker_embedding)
+        try:
+            # Time stretch
+            stretched = librosa.effects.time_stretch(audio, rate=stretch_factor)
 
-            update_progress("Synthesizing audio", 0.7)
+            # Pitch shift to compensate (opposite direction)
+            compensate_semitones = -12 * np.log2(stretch_factor)
+            result = librosa.effects.pitch_shift(
+                stretched,
+                sr=sr,
+                n_steps=compensate_semitones,
+            )
 
-            # Vocode to waveform
-            audio_output = self.vocoder(mel_output)
-            audio_output = audio_output.squeeze().cpu().numpy()
-
-        return audio_output
-
-    def _convert_chunked(
-        self,
-        audio: np.ndarray,
-        sr: int,
-        speaker_embedding: torch.Tensor,
-        content_encoder: ContentEncoder,
-        decoder: VoiceDecoder,
-        cfg: ConversionConfig,
-        arch_config: Optional[Dict],
-        update_progress: Callable[[str, float], None],
-    ) -> np.ndarray:
-        """Convert audio in chunks to avoid OOM on low-memory GPUs."""
-        chunk_size = MAX_CHUNK_SAMPLES
-        overlap = int(sr * cfg.crossfade_ms / 1000) * 2  # Overlap for crossfading
-
-        # Calculate number of chunks
-        num_samples = len(audio)
-        chunks = []
-        chunk_starts = []
-
-        pos = 0
-        while pos < num_samples:
-            end = min(pos + chunk_size, num_samples)
-            chunks.append(audio[pos:end])
-            chunk_starts.append(pos)
-            pos = end - overlap if end < num_samples else end
-
-        logger.info(f"Processing {len(chunks)} chunks")
-
-        output_chunks = []
-        for i, chunk in enumerate(chunks):
-            progress = 0.3 + (0.5 * (i / len(chunks)))
-            update_progress(f"Processing chunk {i+1}/{len(chunks)}", progress)
-
-            # Clear memory before each chunk
-            self._clear_gpu_memory()
-
-            with torch.no_grad():
-                audio_tensor = torch.from_numpy(chunk).float().unsqueeze(0).to(self.device)
-                content_features = content_encoder(audio_tensor)
-
-                # Apply pitch shift if specified
-                if cfg.pitch_shift != 0:
-                    content_features = self._apply_pitch_shift(content_features, cfg.pitch_shift)
-
-                # Decode to mel spectrogram
-                mel_output = decoder(content_features, speaker_embedding)
-
-                # Vocode to waveform
-                chunk_output = self.vocoder(mel_output)
-                chunk_output = chunk_output.squeeze().cpu().numpy()
-
-                output_chunks.append(chunk_output)
-
-                # Free tensors
-                del audio_tensor, content_features, mel_output
-                self._clear_gpu_memory()
-
-        update_progress("Merging chunks", 0.8)
-
-        # Merge chunks with crossfade
-        if len(output_chunks) == 1:
-            return output_chunks[0]
-
-        return self._merge_chunks_with_crossfade(output_chunks, overlap, sr)
-
-    def _merge_chunks_with_crossfade(
-        self,
-        chunks: List[np.ndarray],
-        overlap_samples: int,
-        sr: int,
-    ) -> np.ndarray:
-        """Merge audio chunks with crossfade to avoid clicks."""
-        if not chunks:
-            return np.array([])
-
-        if len(chunks) == 1:
-            return chunks[0]
-
-        # Use a fixed crossfade duration (20ms) regardless of input overlap
-        # This is safer since vocoder output length may differ from input
-        crossfade_samples = min(int(sr * 0.02), min(len(c) // 4 for c in chunks))
-
-        if crossfade_samples < 10:
-            # Too short for crossfade, just concatenate
-            return np.concatenate(chunks)
-
-        # Build result by concatenating with crossfade
-        result = chunks[0].copy()
-
-        for i in range(1, len(chunks)):
-            chunk = chunks[i]
-
-            # Ensure we have enough samples for crossfade
-            fade_len = min(crossfade_samples, len(result), len(chunk))
-
-            if fade_len < 10:
-                # Just concatenate
-                result = np.concatenate([result, chunk])
-            else:
-                # Create crossfade
-                fade_out = np.linspace(1, 0, fade_len)
-                fade_in = np.linspace(0, 1, fade_len)
-
-                # Blend the overlapping region
-                blended = result[-fade_len:] * fade_out + chunk[:fade_len] * fade_in
-
-                # Build new result: everything before fade + blended + rest of chunk
-                result = np.concatenate([result[:-fade_len], blended, chunk[fade_len:]])
-
-        return result
-
-    def _get_speaker_embedding(self, model_id: str) -> torch.Tensor:
-        """Load or compute speaker embedding for model."""
-        if model_id in self._speaker_cache:
-            return self._speaker_cache[model_id]
-
-        # Try to load from model directory
-        model_dir = self.models_dir / model_id
-        embedding_path = model_dir / "speaker_embedding.npy"
-
-        if embedding_path.exists():
-            embedding = np.load(str(embedding_path))
-            embedding_tensor = torch.from_numpy(embedding).float().to(self.device)
-            self._speaker_cache[model_id] = embedding_tensor
-            return embedding_tensor
-
-        # Generate default embedding if model not found
-        logger.warning(f"Speaker embedding not found for {model_id}, using default")
-        default_embedding = torch.zeros(256).to(self.device)
-        return default_embedding
-
-    def _apply_pitch_shift(
-        self,
-        content_features: torch.Tensor,
-        semitones: float,
-    ) -> torch.Tensor:
-        """Apply pitch shift to content features."""
-        # Pitch shift is applied by modifying the F0 component
-        # This is a simplified implementation
-        pitch_factor = 2 ** (semitones / 12.0)
-
-        # Assuming content features have a pitch channel
-        # In practice, this would be more sophisticated
-        return content_features * pitch_factor
+            return result
+        except Exception as e:
+            logger.warning(f"Formant shift failed: {e}")
+            return audio
 
     def _apply_smoothing(self, audio: np.ndarray, strength: float) -> np.ndarray:
         """Apply temporal smoothing to reduce artifacts."""
         from scipy.ndimage import gaussian_filter1d
 
-        sigma = strength * 3
+        sigma = strength * 2
         if sigma > 0:
-            # Apply light smoothing to reduce high-frequency artifacts
             audio = gaussian_filter1d(audio, sigma=sigma)
         return audio
 
@@ -556,12 +370,13 @@ class VoiceConverter:
         sr: int,
         crossfade_ms: float,
     ) -> np.ndarray:
-        """Apply crossfade at the edges."""
+        """Apply fade in/out at the edges."""
         fade_samples = int(sr * crossfade_ms / 1000)
 
         if fade_samples > 0 and len(audio) > 2 * fade_samples:
             # Fade in
             fade_in = np.linspace(0, 1, fade_samples)
+            audio = audio.copy()
             audio[:fade_samples] *= fade_in
 
             # Fade out
@@ -571,22 +386,9 @@ class VoiceConverter:
         return audio
 
     def clear_cache(self):
-        """Clear speaker embedding cache."""
-        self._speaker_cache.clear()
+        """Clear voice characteristics cache."""
+        self._voice_cache.clear()
 
-    def set_device(self, device: torch.device):
-        """Change compute device."""
-        self.device = device
-
-        if self._content_encoder is not None:
-            self._content_encoder = self._content_encoder.to(device)
-        if self._speaker_encoder is not None:
-            self._speaker_encoder = self._speaker_encoder.to(device)
-        if self._decoder is not None:
-            self._decoder = self._decoder.to(device)
-        if self._vocoder is not None:
-            self._vocoder = self._vocoder.to(device)
-
-        # Update cached embeddings
-        for key in self._speaker_cache:
-            self._speaker_cache[key] = self._speaker_cache[key].to(device)
+    def set_device(self, device):
+        """Set device (no-op for signal processing, kept for API compatibility)."""
+        pass
