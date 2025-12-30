@@ -324,6 +324,28 @@ class BuilderPanel(ctk.CTkFrame):
         )
         augment_cb.pack(anchor="w", pady=2)
 
+        self.silence_var = ctk.BooleanVar(value=True)
+        silence_cb = ctk.CTkCheckBox(
+            options,
+            text="Remove silence from audio",
+            font=HelixTheme.FONTS["small"],
+            text_color=HelixTheme.COLORS["text_secondary"],
+            variable=self.silence_var,
+            fg_color=HelixTheme.COLORS["accent"],
+        )
+        silence_cb.pack(anchor="w", pady=2)
+
+        self.autosplit_var = ctk.BooleanVar(value=True)
+        autosplit_cb = ctk.CTkCheckBox(
+            options,
+            text="Auto-split long audio",
+            font=HelixTheme.FONTS["small"],
+            text_color=HelixTheme.COLORS["text_secondary"],
+            variable=self.autosplit_var,
+            fg_color=HelixTheme.COLORS["accent"],
+        )
+        autosplit_cb.pack(anchor="w", pady=2)
+
     def _build_coverage_section(self, parent):
         """Build emotion coverage preview."""
         section = ctk.CTkFrame(parent, fg_color="transparent")
@@ -448,6 +470,8 @@ class BuilderPanel(ctk.CTkFrame):
         samples_copy = list(self._samples)  # Make a copy
         epochs = int(self.epochs_slider.get())
         batch_size = int(self.batch_slider.get())
+        remove_silence = self.silence_var.get()
+        auto_split = self.autosplit_var.get()
 
         self.progress.reset()
         self.progress.set_stage("Uploading samples...")
@@ -469,6 +493,8 @@ class BuilderPanel(ctk.CTkFrame):
                     samples_copy,
                     epochs=epochs,
                     batch_size=batch_size,
+                    remove_silence=remove_silence,
+                    auto_split=auto_split,
                 )
                 job_id = result.get("job_id")
                 if not job_id:

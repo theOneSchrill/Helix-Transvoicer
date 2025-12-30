@@ -153,6 +153,8 @@ async def train_model(
     learning_rate: float = Query(0.0001, ge=0.00001, le=0.01),
     auto_denoise: bool = Query(True),
     augment_data: bool = Query(True),
+    remove_silence: bool = Query(True),
+    auto_split: bool = Query(True),
 ):
     """
     Start training a voice model from audio samples.
@@ -191,10 +193,16 @@ async def train_model(
         # Get pause event from progress callback
         pause_event = progress_callback("Preparing samples", 0.1)
         trainer._pause_event = pause_event
+
+        # Set max_chunk_duration based on auto_split setting
+        max_chunk_duration = 300.0 if auto_split else 999999.0  # Effectively disable if off
+
         samples = await asyncio.to_thread(
             trainer.prepare_samples,
             temp_paths,
             progress_callback=lambda s, p: progress_callback(s, 0.1 + p * 0.2),
+            remove_silence=remove_silence,
+            max_chunk_duration=max_chunk_duration,
         )
 
         # Configure training

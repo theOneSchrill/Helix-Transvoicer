@@ -107,6 +107,8 @@ class APIClient:
         audio_files: List[Path],
         epochs: int = 100,
         batch_size: int = 16,
+        remove_silence: bool = True,
+        auto_split: bool = True,
     ) -> Dict:
         """Start model training."""
         files = [
@@ -121,6 +123,8 @@ class APIClient:
                 params={
                     "epochs": epochs,
                     "batch_size": batch_size,
+                    "remove_silence": remove_silence,
+                    "auto_split": auto_split,
                 },
                 timeout=300.0,
             )
