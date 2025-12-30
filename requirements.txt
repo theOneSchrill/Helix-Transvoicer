@@ -27,6 +27,10 @@ python-dotenv>=1.0.0
 customtkinter>=5.2.0
 pillow>=10.0.0
 matplotlib>=3.7.0
+tkinterdnd2>=0.3.0
+
+# Installer
+pyinstaller>=6.0.0
 
 # Utilities
 tqdm>=4.65.0

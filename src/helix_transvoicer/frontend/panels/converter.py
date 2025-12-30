@@ -5,13 +5,14 @@ Helix Transvoicer - Voice Converter Panel.
 import customtkinter as ctk
 from pathlib import Path
 from tkinter import filedialog
-from typing import Optional
+from typing import List, Optional
 
 from helix_transvoicer.frontend.styles.theme import HelixTheme
 from helix_transvoicer.frontend.utils.api_client import APIClient
 from helix_transvoicer.frontend.components.waveform import WaveformDisplay
 from helix_transvoicer.frontend.components.progress import ProgressIndicator
 from helix_transvoicer.frontend.components.controls import Slider, DropdownSelect
+from helix_transvoicer.frontend.components.dropzone import DropZone
 
 
 class ConverterPanel(ctk.CTkFrame):
@@ -108,30 +109,38 @@ class ConverterPanel(ctk.CTkFrame):
         )
         title.pack(anchor="w", pady=(0, 10))
 
-        # Waveform display
-        self.source_waveform = WaveformDisplay(section, width=600, height=80)
-        self.source_waveform.pack(fill="x", pady=10)
-
-        # Controls
-        controls = ctk.CTkFrame(section, fg_color="transparent")
-        controls.pack(fill="x")
-
-        self.load_btn = ctk.CTkButton(
-            controls,
-            text="📂 Load File",
-            width=120,
-            **HelixTheme.get_button_style("secondary"),
-            command=self._on_load_source,
+        # Drop zone for audio files
+        self.drop_zone = DropZone(
+            section,
+            on_files_dropped=self._on_files_dropped,
+            filetypes=[
+                ("Audio files", "*.wav *.mp3 *.flac *.ogg"),
+                ("WAV files", "*.wav"),
+                ("MP3 files", "*.mp3"),
+                ("FLAC files", "*.flac"),
+                ("All files", "*.*"),
+            ],
+            multiple=False,
+            width=600,
+            height=100,
+            title="Drop audio file here",
+            subtitle="or click to browse",
+            icon="🎵",
         )
-        self.load_btn.pack(side="left", padx=(0, 10))
+        self.drop_zone.pack(fill="x", pady=10)
 
+        # File info label
         self.source_info = ctk.CTkLabel(
-            controls,
+            section,
             text="No file loaded",
             font=HelixTheme.FONTS["small"],
             text_color=HelixTheme.COLORS["text_tertiary"],
         )
-        self.source_info.pack(side="left")
+        self.source_info.pack(anchor="w")
+
+        # Waveform display
+        self.source_waveform = WaveformDisplay(section, width=600, height=80)
+        self.source_waveform.pack(fill="x", pady=10)
 
     def _build_output_section(self, parent):
         """Build output audio section."""
@@ -274,27 +283,17 @@ class ConverterPanel(ctk.CTkFrame):
         except Exception:
             self.model_select.update_options(["Error loading models"])
 
-    def _on_load_source(self):
-        """Handle load source audio."""
-        filetypes = [
-            ("Audio files", "*.wav *.mp3 *.flac *.ogg"),
-            ("WAV files", "*.wav"),
-            ("MP3 files", "*.mp3"),
-            ("FLAC files", "*.flac"),
-            ("All files", "*.*"),
-        ]
-
-        path = filedialog.askopenfilename(
-            title="Select Source Audio",
-            filetypes=filetypes,
-        )
-
-        if path:
-            self._source_path = Path(path)
+    def _on_files_dropped(self, files: List[Path]):
+        """Handle files dropped or selected via drop zone."""
+        if files:
+            self._source_path = files[0]
             self.source_info.configure(
-                text=f"{self._source_path.name}",
-                text_color=HelixTheme.COLORS["text_primary"],
+                text=f"Loaded: {self._source_path.name}",
+                text_color=HelixTheme.COLORS["accent"],
             )
+            self.drop_zone.flash_success()
+            self.drop_zone.set_title(self._source_path.name)
+            self.drop_zone.set_subtitle("Click to change file")
             # In a real implementation, we'd load and display the waveform
             self.source_waveform._draw_empty()
 
@@ -352,6 +351,8 @@ class ConverterPanel(ctk.CTkFrame):
             text="No file loaded",
             text_color=HelixTheme.COLORS["text_tertiary"],
         )
+        self.drop_zone.set_title("Drop audio file here")
+        self.drop_zone.set_subtitle("or click to browse")
         self.source_waveform.clear()
         self.output_waveform.clear()
         self.progress.reset()

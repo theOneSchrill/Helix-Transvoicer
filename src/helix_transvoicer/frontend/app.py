@@ -1,5 +1,7 @@
 """
 Helix Transvoicer - Main application window.
+
+Modern, sleek UI for AI-powered voice processing.
 """
 
 import customtkinter as ctk
@@ -19,11 +21,11 @@ class HelixApp:
     """
     Main Helix Transvoicer application.
 
-    A modern, dark-themed UI for voice processing.
+    A modern, dark-themed UI for voice processing with AI.
     """
 
-    WINDOW_TITLE = "HELIX TRANSVOICER"
-    WINDOW_SIZE = (1400, 900)
+    WINDOW_TITLE = "Helix Transvoicer"
+    WINDOW_SIZE = (1440, 900)
     MIN_SIZE = (1200, 700)
 
     def __init__(self, api_url: str = "http://127.0.0.1:8420"):
@@ -35,6 +37,7 @@ class HelixApp:
         self.root.title(self.WINDOW_TITLE)
         self.root.geometry(f"{self.WINDOW_SIZE[0]}x{self.WINDOW_SIZE[1]}")
         self.root.minsize(*self.MIN_SIZE)
+        self.root.configure(fg_color=HelixTheme.COLORS["bg_primary"])
 
         # API client
         self.api_client = APIClient(api_url)
@@ -58,7 +61,7 @@ class HelixApp:
         self.root.grid_columnconfigure(0, weight=1)
         self.root.grid_rowconfigure(1, weight=1)
 
-        # Header with tabs
+        # Modern header with navigation
         self._build_header()
 
         # Main content area
@@ -83,59 +86,112 @@ class HelixApp:
         self._panels["library"] = LibraryPanel(self.content_frame, self.api_client)
 
     def _build_header(self):
-        """Build the header with navigation tabs."""
+        """Build the modern header with navigation."""
         header = ctk.CTkFrame(
             self.root,
             fg_color=HelixTheme.COLORS["bg_secondary"],
             corner_radius=0,
-            height=50,
+            height=60,
         )
         header.grid(row=0, column=0, sticky="ew")
         header.grid_columnconfigure(1, weight=1)
+        header.grid_propagate(False)
 
-        # Logo/title
+        # Logo section
+        logo_frame = ctk.CTkFrame(header, fg_color="transparent")
+        logo_frame.grid(row=0, column=0, padx=24, pady=0, sticky="w")
+
+        # App logo icon (stylized H)
+        logo_icon = ctk.CTkLabel(
+            logo_frame,
+            text="◆",
+            font=("", 24),
+            text_color=HelixTheme.COLORS["accent"],
+        )
+        logo_icon.pack(side="left", padx=(0, 8))
+
+        # App title
         title = ctk.CTkLabel(
-            header,
-            text="HELIX TRANSVOICER",
+            logo_frame,
+            text="Helix",
+            font=HelixTheme.FONTS["title"],
+            text_color=HelixTheme.COLORS["text_primary"],
+        )
+        title.pack(side="left")
+
+        subtitle = ctk.CTkLabel(
+            logo_frame,
+            text="Transvoicer",
             font=HelixTheme.FONTS["title"],
             text_color=HelixTheme.COLORS["accent"],
         )
-        title.grid(row=0, column=0, padx=20, pady=10)
+        subtitle.pack(side="left", padx=(4, 0))
 
-        # Tab buttons container
-        tabs_frame = ctk.CTkFrame(
+        # Navigation tabs container
+        nav_frame = ctk.CTkFrame(
             header,
             fg_color="transparent",
         )
-        tabs_frame.grid(row=0, column=1, sticky="w", padx=20)
+        nav_frame.grid(row=0, column=1, sticky="", padx=20)
 
         self._tab_buttons = {}
-        tab_names = [
-            ("converter", "VOICE CONVERTER"),
-            ("builder", "MODEL BUILDER"),
-            ("emotions", "EMOTION MAP"),
-            ("tts", "TTS STUDIO"),
-            ("library", "LIBRARY"),
+        self._tab_indicators = {}
+
+        tab_config = [
+            ("converter", "Voice Convert", "🎙"),
+            ("builder", "Model Builder", "🔧"),
+            ("emotions", "Emotions", "😊"),
+            ("tts", "TTS Studio", "🔊"),
+            ("library", "Library", "📚"),
         ]
 
-        for i, (key, label) in enumerate(tab_names):
+        for i, (key, label, icon) in enumerate(tab_config):
+            # Tab container
+            tab_container = ctk.CTkFrame(nav_frame, fg_color="transparent")
+            tab_container.grid(row=0, column=i, padx=4)
+
+            # Tab button
             btn = ctk.CTkButton(
-                tabs_frame,
-                text=label,
+                tab_container,
+                text=f"{icon}  {label}",
                 font=HelixTheme.FONTS["button"],
                 fg_color="transparent",
                 hover_color=HelixTheme.COLORS["bg_hover"],
-                text_color=HelixTheme.COLORS["text_secondary"],
-                corner_radius=0,
+                text_color=HelixTheme.COLORS["text_tertiary"],
+                corner_radius=HelixTheme.RADIUS["md"],
                 width=130,
-                height=40,
+                height=36,
                 command=lambda k=key: self._switch_panel(k),
             )
-            btn.grid(row=0, column=i, padx=2)
+            btn.pack(pady=(12, 4))
+
+            # Active indicator (underline)
+            indicator = ctk.CTkFrame(
+                tab_container,
+                fg_color="transparent",
+                height=3,
+                width=80,
+                corner_radius=2,
+            )
+            indicator.pack()
+
             self._tab_buttons[key] = btn
+            self._tab_indicators[key] = indicator
+
+        # Right side - version/settings placeholder
+        right_frame = ctk.CTkFrame(header, fg_color="transparent")
+        right_frame.grid(row=0, column=2, padx=24, sticky="e")
+
+        version_label = ctk.CTkLabel(
+            right_frame,
+            text="v1.0",
+            font=HelixTheme.FONTS["tiny"],
+            text_color=HelixTheme.COLORS["text_tertiary"],
+        )
+        version_label.pack(side="right")
 
     def _switch_panel(self, panel_name: str):
-        """Switch to a different panel."""
+        """Switch to a different panel with smooth transition."""
         if self._current_panel == panel_name:
             return
 
@@ -145,27 +201,32 @@ class HelixApp:
 
         # Update tab styling
         for key, btn in self._tab_buttons.items():
+            indicator = self._tab_indicators.get(key)
             if key == panel_name:
                 btn.configure(
-                    fg_color=HelixTheme.COLORS["accent"],
+                    fg_color=HelixTheme.COLORS["bg_hover"],
                     text_color=HelixTheme.COLORS["text_primary"],
                 )
+                if indicator:
+                    indicator.configure(fg_color=HelixTheme.COLORS["accent"])
             else:
                 btn.configure(
                     fg_color="transparent",
-                    text_color=HelixTheme.COLORS["text_secondary"],
+                    text_color=HelixTheme.COLORS["text_tertiary"],
                 )
+                if indicator:
+                    indicator.configure(fg_color="transparent")
 
         # Show new panel
         self._current_panel = panel_name
         panel = self._panels.get(panel_name)
         if panel:
-            panel.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+            panel.grid(row=0, column=0, sticky="nsew", padx=24, pady=24)
 
     def _update_status(self):
         """Periodically update status bar."""
         self.status_bar.update()
-        self.root.after(5000, self._update_status)  # Update every 5 seconds
+        self.root.after(5000, self._update_status)
 
     def run(self):
         """Run the application main loop."""
@@ -173,4 +234,5 @@ class HelixApp:
 
     def quit(self):
         """Quit the application."""
+        self.api_client.close()
         self.root.quit()

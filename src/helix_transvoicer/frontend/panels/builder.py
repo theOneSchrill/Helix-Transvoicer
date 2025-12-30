@@ -14,6 +14,7 @@ from helix_transvoicer.frontend.styles.theme import HelixTheme
 from helix_transvoicer.frontend.utils.api_client import APIClient
 from helix_transvoicer.frontend.components.progress import ProgressIndicator
 from helix_transvoicer.frontend.components.controls import Slider
+from helix_transvoicer.frontend.components.dropzone import DropZone
 
 
 class BuilderPanel(ctk.CTkFrame):
@@ -194,6 +195,23 @@ class BuilderPanel(ctk.CTkFrame):
         )
         self.sample_count.pack(side="right")
 
+        # Drop zone for audio samples
+        self.drop_zone = DropZone(
+            section,
+            on_files_dropped=self._on_files_dropped,
+            filetypes=[
+                ("Audio files", "*.wav *.mp3 *.flac"),
+                ("All files", "*.*"),
+            ],
+            multiple=True,
+            width=600,
+            height=100,
+            title="Drop training samples here",
+            subtitle="or click to browse (WAV, MP3, FLAC)",
+            icon="🎤",
+        )
+        self.drop_zone.pack(fill="x", pady=10)
+
         # Sample list
         list_frame = ctk.CTkFrame(
             section,
@@ -217,8 +235,8 @@ class BuilderPanel(ctk.CTkFrame):
 
         add_btn = ctk.CTkButton(
             btn_frame,
-            text="+ Add Files",
-            width=120,
+            text="+ Add More Files",
+            width=140,
             **HelixTheme.get_button_style("secondary"),
             command=self._on_add_samples,
         )
@@ -407,7 +425,28 @@ class BuilderPanel(ctk.CTkFrame):
             self.sample_list.insert("end", f"{i}. {path.name}\n")
 
         self.sample_list.configure(state="disabled")
-        self.sample_count.configure(text=f"{len(self._samples)} samples")
+        count = len(self._samples)
+        self.sample_count.configure(text=f"{count} sample{'s' if count != 1 else ''}")
+
+        # Update drop zone text based on state
+        if count > 0:
+            self.drop_zone.set_title(f"{count} file{'s' if count != 1 else ''} added")
+            self.drop_zone.set_subtitle("Drop more files or click to add")
+        else:
+            self.drop_zone.set_title("Drop training samples here")
+            self.drop_zone.set_subtitle("or click to browse (WAV, MP3, FLAC)")
+
+    def _on_files_dropped(self, files: List[Path]):
+        """Handle files dropped onto the drop zone."""
+        added = 0
+        for path in files:
+            if path not in self._samples:
+                self._samples.append(path)
+                added += 1
+
+        if added > 0:
+            self.drop_zone.flash_success()
+            self._update_sample_list()
 
     def _on_add_samples(self):
         """Add sample files."""
