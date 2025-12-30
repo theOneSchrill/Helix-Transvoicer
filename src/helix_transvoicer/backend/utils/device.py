@@ -3,6 +3,7 @@ Helix Transvoicer - Device management for CPU/GPU processing.
 """
 
 import logging
+import sys
 from dataclasses import dataclass
 from typing import Optional
 
@@ -35,6 +36,20 @@ class DeviceManager:
 
     def _initialize_device(self) -> None:
         """Initialize the compute device."""
+        # Log system info for debugging
+        logger.info(f"Python version: {sys.version}")
+        logger.info(f"PyTorch version: {torch.__version__}")
+        logger.info(f"CUDA compiled: {torch.version.cuda or 'No'}")
+        logger.info(f"CUDA available: {torch.cuda.is_available()}")
+
+        if torch.cuda.is_available():
+            logger.info(f"CUDA device count: {torch.cuda.device_count()}")
+        else:
+            # Log why CUDA might not be available
+            if not torch.version.cuda:
+                logger.warning("PyTorch was NOT compiled with CUDA support!")
+                logger.warning("Install CUDA version: pip install torch --index-url https://download.pytorch.org/whl/cu118")
+
         if self.settings.force_cpu:
             self._device = torch.device("cpu")
             self._device_info = DeviceInfo(
@@ -42,7 +57,7 @@ class DeviceManager:
                 type="cpu",
                 index=0,
             )
-            logger.info("Using CPU (forced)")
+            logger.info("Using CPU (forced by settings)")
             return
 
         # Try CUDA first
@@ -65,7 +80,7 @@ class DeviceManager:
                 total_memory=props.total_memory,
                 available_memory=torch.cuda.memory_reserved(device_index),
             )
-            logger.info(f"Using CUDA: {props.name}")
+            logger.info(f"Using CUDA GPU: {props.name} ({props.total_memory // 1024 // 1024} MB)")
             return
 
         # Try MPS (Apple Silicon)
@@ -86,7 +101,7 @@ class DeviceManager:
             type="cpu",
             index=0,
         )
-        logger.info("Using CPU (no GPU available)")
+        logger.info("Using CPU - no GPU acceleration available")
 
     @property
     def device(self) -> torch.device:
