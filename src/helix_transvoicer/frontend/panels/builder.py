@@ -387,11 +387,12 @@ class BuilderPanel(ctk.CTkFrame):
             return
 
         self.progress.reset()
-        self.progress.set_stage("Starting training...")
+        self.progress.set_stage("Uploading samples...")
         self.train_btn.configure(state="disabled")
+        self._current_job_id = None
 
-        # Run training in background thread to avoid GUI freeze
-        def train_thread():
+        # Submit job in background thread
+        def submit_job():
             try:
                 result = self.api_client.train_model(
                     model_name,
@@ -399,20 +400,61 @@ class BuilderPanel(ctk.CTkFrame):
                     epochs=int(self.epochs_slider.get()),
                     batch_size=int(self.batch_slider.get()),
                 )
-                # Update UI from main thread
-                self.after(0, self._on_train_complete, result)
+                job_id = result.get("job_id")
+                if job_id:
+                    self._current_job_id = job_id
+                    # Start polling for progress
+                    self.after(0, self._poll_job_progress)
+                else:
+                    self.after(0, self._on_train_error, "No job ID returned")
             except Exception as e:
                 self.after(0, self._on_train_error, str(e))
 
-        thread = threading.Thread(target=train_thread, daemon=True)
+        thread = threading.Thread(target=submit_job, daemon=True)
         thread.start()
+
+    def _poll_job_progress(self):
+        """Poll for job progress and update UI."""
+        if not self._current_job_id:
+            return
+
+        def check_status():
+            try:
+                job = self.api_client.get_job(self._current_job_id)
+                status = job.get("status", "unknown")
+                progress = job.get("progress", 0)
+                stage = job.get("stage", "")
+
+                if status == "completed":
+                    self.after(0, self._on_train_complete, job)
+                elif status == "failed":
+                    self.after(0, self._on_train_error, stage or "Training failed")
+                elif status == "cancelled":
+                    self.after(0, self._on_train_error, "Training cancelled")
+                else:
+                    # Still running - update progress and continue polling
+                    self.after(0, self._update_progress, progress, stage)
+                    self.after(1000, self._poll_job_progress)  # Poll again in 1 second
+            except Exception as e:
+                self.after(0, self._on_train_error, str(e))
+
+        thread = threading.Thread(target=check_status, daemon=True)
+        thread.start()
+
+    def _update_progress(self, progress: float, stage: str):
+        """Update progress indicator."""
+        self.progress.set_progress(progress)
+        if stage:
+            self.progress.set_stage(stage)
 
     def _on_train_complete(self, result):
         """Handle training completion (called from main thread)."""
         self.progress.set_complete()
         self.train_btn.configure(state="normal")
+        self._current_job_id = None
 
     def _on_train_error(self, error_msg: str):
         """Handle training error (called from main thread)."""
         self.progress.set_error(error_msg[:50])
         self.train_btn.configure(state="normal")
+        self._current_job_id = None

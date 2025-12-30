@@ -421,7 +421,19 @@ class ModelTrainer:
                         epoch + 1,
                     )
 
-                logger.debug(f"Epoch {epoch + 1}/{config.epochs}, Loss: {epoch_loss:.6f}")
+                # Console progress with visual bar
+                progress_pct = (epoch + 1) / config.epochs * 100
+                bar_len = 30
+                filled = int(bar_len * (epoch + 1) / config.epochs)
+                bar = "█" * filled + "░" * (bar_len - filled)
+                elapsed = time.time() - start_time
+                eta = elapsed / (epoch + 1) * (config.epochs - epoch - 1)
+                logger.info(
+                    f"Training [{bar}] {progress_pct:5.1f}% | "
+                    f"Epoch {epoch + 1}/{config.epochs} | "
+                    f"Loss: {epoch_loss:.6f} | "
+                    f"ETA: {eta:.0f}s"
+                )
 
         except Exception as e:
             logger.error(f"Training failed: {e}")
