@@ -163,10 +163,10 @@ async def train_model(
     device_manager = request.app.state.device_manager
     model_manager = request.app.state.model_manager
 
-    if len(files) < 3:
+    if len(files) < 1:
         raise HTTPException(
             status_code=400,
-            detail="At least 3 audio samples required for training",
+            detail="At least 1 audio sample required for training",
         )
 
     # Save uploaded files
