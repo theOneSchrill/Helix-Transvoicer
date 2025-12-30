@@ -386,7 +386,8 @@ class ModelTrainer:
             total_mem = props.total_memory / 1e9
             allocated_mem = torch.cuda.memory_allocated(0) / 1e9
             logger.info(f"GPU: {props.name}, Total: {total_mem:.1f}GB, Allocated: {allocated_mem:.2f}GB")
-            if total_mem <= 8.5:  # 8GB or less
+            # Enable low memory mode for GPUs with 10GB or less (covers 8GB cards that report ~8.6GB)
+            if total_mem <= 10.0:
                 low_memory_mode = True
                 logger.info(f"Low memory mode enabled ({total_mem:.1f}GB GPU)")
 
