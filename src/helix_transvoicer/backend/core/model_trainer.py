@@ -88,32 +88,78 @@ class TrainingResult:
 
 
 class VoiceDataset(Dataset):
-    """Dataset for voice model training."""
+    """Dataset for voice model training with automatic chunking for long audio."""
+
+    # Maximum chunk duration in seconds (5 seconds fits comfortably in memory)
+    MAX_CHUNK_SECONDS = 5.0
 
     def __init__(
         self,
         samples: List[TrainingSample],
         augment: bool = True,
     ):
-        self.samples = samples
         self.augment = augment
         self.settings = get_settings()
 
+        # Chunk long audio into manageable segments
+        self.chunks = []
+        for sample in samples:
+            chunks = self._chunk_audio(sample)
+            self.chunks.extend(chunks)
+
+        logger.info(f"Created {len(self.chunks)} training chunks from {len(samples)} samples")
+
+    def _chunk_audio(self, sample: TrainingSample) -> List[Dict]:
+        """Split long audio into chunks."""
+        max_samples = int(self.MAX_CHUNK_SECONDS * sample.sample_rate)
+        audio = sample.audio
+
+        if len(audio) <= max_samples:
+            # Short enough, use as-is
+            return [{
+                "audio": audio,
+                "sample_rate": sample.sample_rate,
+                "emotion": sample.emotion,
+            }]
+
+        # Split into overlapping chunks (50% overlap for continuity)
+        chunks = []
+        hop = max_samples // 2
+        for start in range(0, len(audio) - max_samples + 1, hop):
+            chunk_audio = audio[start:start + max_samples]
+            chunks.append({
+                "audio": chunk_audio,
+                "sample_rate": sample.sample_rate,
+                "emotion": sample.emotion,
+            })
+
+        # Add final chunk if there's remaining audio
+        if len(audio) % hop != 0:
+            chunk_audio = audio[-max_samples:]
+            chunks.append({
+                "audio": chunk_audio,
+                "sample_rate": sample.sample_rate,
+                "emotion": sample.emotion,
+            })
+
+        return chunks
+
     def __len__(self) -> int:
-        return len(self.samples)
+        return len(self.chunks)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        sample = self.samples[idx]
-        audio = sample.audio
+        chunk = self.chunks[idx]
+        audio = chunk["audio"].copy()
+        sample_rate = chunk["sample_rate"]
 
         # Data augmentation
         if self.augment:
-            audio = self._augment(audio, sample.sample_rate)
+            audio = self._augment(audio, sample_rate)
 
         # Compute mel spectrogram
         mel = AudioUtils.compute_mel_spectrogram(
             audio,
-            sample_rate=sample.sample_rate,
+            sample_rate=sample_rate,
             n_fft=self.settings.n_fft,
             hop_length=self.settings.hop_length,
             n_mels=self.settings.n_mels,
@@ -122,7 +168,7 @@ class VoiceDataset(Dataset):
         return {
             "mel": torch.from_numpy(mel).float(),
             "audio": torch.from_numpy(audio).float(),
-            "emotion": sample.emotion,
+            "emotion": chunk["emotion"],
         }
 
     def _augment(self, audio: np.ndarray, sr: int) -> np.ndarray:
