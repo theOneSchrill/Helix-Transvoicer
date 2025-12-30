@@ -218,14 +218,22 @@ class ModelTrainer:
         self,
         audio_paths: List[Union[str, Path]],
         progress_callback: Optional[Callable[[str, float], None]] = None,
+        remove_silence: bool = True,
     ) -> List[TrainingSample]:
         """
         Prepare training samples from audio files.
 
-        Processes audio and analyzes emotions.
+        Processes audio, removes silence, and analyzes emotions.
+
+        Args:
+            audio_paths: List of paths to audio files
+            progress_callback: Callback for progress updates
+            remove_silence: Whether to remove silent segments (speeds up training)
         """
         samples = []
         total = len(audio_paths)
+        total_original_duration = 0
+        total_processed_duration = 0
 
         for i, path in enumerate(audio_paths):
             try:
@@ -234,19 +242,35 @@ class ModelTrainer:
 
                 # Process audio
                 processed = self.audio_processor.process(path)
+                audio = processed.audio
+                original_duration = processed.duration
+                total_original_duration += original_duration
+
+                # Remove silence to speed up training
+                if remove_silence:
+                    audio = AudioUtils.remove_silence(
+                        audio,
+                        sample_rate=processed.sample_rate,
+                        top_db=30.0,  # Threshold for silence detection
+                        min_silence_duration=0.1,  # Remove silences > 100ms
+                        keep_short_silence=0.05,  # Keep 50ms gaps between segments
+                    )
+
+                processed_duration = len(audio) / processed.sample_rate
+                total_processed_duration += processed_duration
 
                 # Analyze emotion
                 emotions = self.emotion_analyzer.analyze(
-                    processed.audio,
+                    audio,
                     processed.sample_rate,
                 )
                 primary_emotion = max(emotions, key=emotions.get)
                 emotion_confidence = emotions[primary_emotion]
 
                 sample = TrainingSample(
-                    audio=processed.audio,
+                    audio=audio,
                     sample_rate=processed.sample_rate,
-                    duration=processed.duration,
+                    duration=processed_duration,
                     emotion=primary_emotion,
                     emotion_confidence=emotion_confidence,
                     quality_score=processed.quality_score,
@@ -260,6 +284,12 @@ class ModelTrainer:
 
         if progress_callback:
             progress_callback("Preparation complete", 1.0)
+
+        # Log total silence removed
+        if remove_silence and total_original_duration > 0:
+            removed_pct = (1 - total_processed_duration / total_original_duration) * 100
+            logger.info(f"Total audio: {total_original_duration:.1f}s -> {total_processed_duration:.1f}s "
+                        f"({removed_pct:.0f}% silence removed)")
 
         return samples
 

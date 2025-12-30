@@ -157,6 +157,66 @@ class AudioUtils:
         return trimmed
 
     @staticmethod
+    def remove_silence(
+        audio: np.ndarray,
+        sample_rate: int = 22050,
+        top_db: float = 30.0,
+        min_silence_duration: float = 0.1,
+        keep_short_silence: float = 0.05,
+    ) -> np.ndarray:
+        """
+        Remove silent segments from audio (beginning, middle, and end).
+
+        Args:
+            audio: Audio samples
+            sample_rate: Sample rate
+            top_db: Threshold for silence detection (lower = more aggressive)
+            min_silence_duration: Minimum silence duration to remove (seconds)
+            keep_short_silence: Keep this much silence between segments (seconds)
+
+        Returns:
+            Audio with silence removed
+        """
+        # Get non-silent intervals
+        intervals = librosa.effects.split(
+            audio,
+            top_db=top_db,
+            frame_length=2048,
+            hop_length=512,
+        )
+
+        if len(intervals) == 0:
+            return audio
+
+        # Calculate samples for minimum durations
+        min_silence_samples = int(min_silence_duration * sample_rate)
+        keep_samples = int(keep_short_silence * sample_rate)
+
+        # Build output by concatenating non-silent segments with short gaps
+        segments = []
+        prev_end = 0
+
+        for start, end in intervals:
+            # Check if gap since last segment is long enough to be considered silence
+            gap = start - prev_end
+            if gap > min_silence_samples and len(segments) > 0:
+                # Add a short silence between segments
+                segments.append(np.zeros(keep_samples))
+
+            segments.append(audio[start:end])
+            prev_end = end
+
+        if len(segments) == 0:
+            return audio
+
+        result = np.concatenate(segments)
+
+        logger.info(f"Silence removal: {len(audio)/sample_rate:.1f}s -> {len(result)/sample_rate:.1f}s "
+                    f"({(1 - len(result)/len(audio))*100:.0f}% removed)")
+
+        return result
+
+    @staticmethod
     def compute_mel_spectrogram(
         audio: np.ndarray,
         sample_rate: int = 22050,
