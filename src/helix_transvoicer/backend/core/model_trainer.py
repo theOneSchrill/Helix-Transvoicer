@@ -393,10 +393,22 @@ class ModelTrainer:
 
         # Initialize models (smaller versions for low memory GPUs)
         if low_memory_mode:
-            # Smaller models for 8GB GPUs: hidden_dim=128, num_layers=2
-            content_encoder = ContentEncoder(hidden_dim=128, output_dim=128, num_layers=2).to(self.device)
-            speaker_encoder = SpeakerEncoder(input_dim=self.settings.n_mels, hidden_dim=128, embedding_dim=128).to(self.device)
-            decoder = VoiceDecoder(content_dim=128, speaker_dim=128, hidden_dim=256, n_mels=self.settings.n_mels, num_layers=2).to(self.device)
+            # VERY small models for 8GB GPUs: hidden_dim=64, num_layers=1
+            logger.info("Using minimal model architecture for low memory GPU")
+            content_encoder = ContentEncoder(hidden_dim=64, output_dim=64, num_layers=1).to(self.device)
+            speaker_encoder = SpeakerEncoder(input_dim=self.settings.n_mels, hidden_dim=64, embedding_dim=64).to(self.device)
+            decoder = VoiceDecoder(content_dim=64, speaker_dim=64, hidden_dim=128, n_mels=self.settings.n_mels, num_layers=1).to(self.device)
+
+            # Force smaller batch size for low memory mode
+            if config.batch_size > 4:
+                logger.info(f"Reducing batch size from {config.batch_size} to 4 for low memory mode")
+                dataloader = DataLoader(
+                    dataset,
+                    batch_size=min(4, len(dataset)),
+                    shuffle=True,
+                    num_workers=0,
+                    pin_memory=False,  # Disable pin_memory to save memory
+                )
         else:
             content_encoder = ContentEncoder().to(self.device)
             speaker_encoder = SpeakerEncoder(input_dim=self.settings.n_mels).to(self.device)
