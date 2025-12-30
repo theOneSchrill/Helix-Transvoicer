@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 
-from helix_transvoicer.backend.core.audio_processor import AudioProcessor, ProcessedAudio
+from helix_transvoicer.backend.core.audio_processor import AudioProcessor, ProcessedAudio, ProcessingConfig
 from helix_transvoicer.backend.core.emotion_analyzer import EmotionAnalyzer
 from helix_transvoicer.backend.models.encoder import ContentEncoder, SpeakerEncoder
 from helix_transvoicer.backend.models.decoder import VoiceDecoder
@@ -209,7 +209,9 @@ class ModelTrainer:
         self.device = device or torch.device("cpu")
         self.models_dir = models_dir or self.settings.models_dir
 
-        self.audio_processor = AudioProcessor()
+        # Use config that allows long audio (will be split later)
+        training_config = ProcessingConfig(skip_max_duration_check=True)
+        self.audio_processor = AudioProcessor(config=training_config)
         self.emotion_analyzer = EmotionAnalyzer(device=self.device)
 
         self._current_training: Optional[Dict] = None
