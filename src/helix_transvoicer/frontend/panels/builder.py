@@ -3,6 +3,7 @@ Helix Transvoicer - Model Builder Panel.
 """
 
 import threading
+import time
 import customtkinter as ctk
 from pathlib import Path
 from tkinter import filedialog
@@ -390,10 +391,12 @@ class BuilderPanel(ctk.CTkFrame):
         self.progress.set_stage("Uploading samples...")
         self.train_btn.configure(state="disabled")
         self._current_job_id = None
+        self._training_active = True
 
-        # Submit job in background thread
-        def submit_job():
+        # Single background thread handles upload + polling
+        def training_worker():
             try:
+                # Step 1: Upload and submit job
                 result = self.api_client.train_model(
                     model_name,
                     self._samples,
@@ -401,44 +404,43 @@ class BuilderPanel(ctk.CTkFrame):
                     batch_size=int(self.batch_slider.get()),
                 )
                 job_id = result.get("job_id")
-                if job_id:
-                    self._current_job_id = job_id
-                    # Start polling for progress
-                    self.after(0, self._poll_job_progress)
-                else:
+                if not job_id:
                     self.after(0, self._on_train_error, "No job ID returned")
+                    return
+
+                self._current_job_id = job_id
+                self.after(0, lambda: self.progress.set_stage("Training..."))
+
+                # Step 2: Poll for progress in same thread
+                while self._training_active:
+                    time.sleep(1)  # Poll every second
+
+                    try:
+                        job = self.api_client.get_job(job_id)
+                        status = job.get("status", "unknown")
+                        progress = job.get("progress", 0)
+                        stage = job.get("stage", "")
+
+                        if status == "completed":
+                            self.after(0, self._on_train_complete, job)
+                            return
+                        elif status == "failed":
+                            self.after(0, self._on_train_error, stage or "Training failed")
+                            return
+                        elif status == "cancelled":
+                            self.after(0, self._on_train_error, "Training cancelled")
+                            return
+                        else:
+                            # Update progress on main thread
+                            self.after(0, self._update_progress, progress, stage)
+                    except Exception as e:
+                        self.after(0, self._on_train_error, str(e))
+                        return
+
             except Exception as e:
                 self.after(0, self._on_train_error, str(e))
 
-        thread = threading.Thread(target=submit_job, daemon=True)
-        thread.start()
-
-    def _poll_job_progress(self):
-        """Poll for job progress and update UI."""
-        if not self._current_job_id:
-            return
-
-        def check_status():
-            try:
-                job = self.api_client.get_job(self._current_job_id)
-                status = job.get("status", "unknown")
-                progress = job.get("progress", 0)
-                stage = job.get("stage", "")
-
-                if status == "completed":
-                    self.after(0, self._on_train_complete, job)
-                elif status == "failed":
-                    self.after(0, self._on_train_error, stage or "Training failed")
-                elif status == "cancelled":
-                    self.after(0, self._on_train_error, "Training cancelled")
-                else:
-                    # Still running - update progress and continue polling
-                    self.after(0, self._update_progress, progress, stage)
-                    self.after(1000, self._poll_job_progress)  # Poll again in 1 second
-            except Exception as e:
-                self.after(0, self._on_train_error, str(e))
-
-        thread = threading.Thread(target=check_status, daemon=True)
+        thread = threading.Thread(target=training_worker, daemon=True)
         thread.start()
 
     def _update_progress(self, progress: float, stage: str):
@@ -449,12 +451,14 @@ class BuilderPanel(ctk.CTkFrame):
 
     def _on_train_complete(self, result):
         """Handle training completion (called from main thread)."""
+        self._training_active = False
         self.progress.set_complete()
         self.train_btn.configure(state="normal")
         self._current_job_id = None
 
     def _on_train_error(self, error_msg: str):
         """Handle training error (called from main thread)."""
+        self._training_active = False
         self.progress.set_error(error_msg[:50])
         self.train_btn.configure(state="normal")
         self._current_job_id = None
