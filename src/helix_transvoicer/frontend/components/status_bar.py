@@ -1,5 +1,5 @@
 """
-Helix Transvoicer - Status bar component.
+Helix Transvoicer - Modern status bar component.
 """
 
 import customtkinter as ctk
@@ -11,14 +11,14 @@ from helix_transvoicer.frontend.utils.api_client import APIClient
 
 class StatusBar(ctk.CTkFrame):
     """
-    Status bar showing system status, device info, and current model.
+    Modern status bar showing system status, device info, and metrics.
     """
 
     def __init__(self, parent, api_client: APIClient):
         super().__init__(
             parent,
             fg_color=HelixTheme.COLORS["bg_secondary"],
-            height=30,
+            height=36,
             corner_radius=0,
         )
 
@@ -27,64 +27,89 @@ class StatusBar(ctk.CTkFrame):
 
     def _build_ui(self):
         """Build status bar UI."""
-        self.grid_columnconfigure(3, weight=1)
+        self.grid_columnconfigure(2, weight=1)
+        self.grid_propagate(False)
 
-        # Device info
+        # Left section - Status indicator
+        left_frame = ctk.CTkFrame(self, fg_color="transparent")
+        left_frame.grid(row=0, column=0, padx=16, pady=0, sticky="w")
+
+        self.status_dot = ctk.CTkLabel(
+            left_frame,
+            text="●",
+            font=("", 10),
+            text_color=HelixTheme.COLORS["text_tertiary"],
+            width=12,
+        )
+        self.status_dot.pack(side="left", padx=(0, 6))
+
+        self.status_label = ctk.CTkLabel(
+            left_frame,
+            text="Connecting...",
+            font=HelixTheme.FONTS["tiny"],
+            text_color=HelixTheme.COLORS["text_tertiary"],
+        )
+        self.status_label.pack(side="left")
+
+        # Divider
+        self._add_divider(row=0, column=1)
+
+        # Center section - Device info
+        center_frame = ctk.CTkFrame(self, fg_color="transparent")
+        center_frame.grid(row=0, column=2, sticky="w", padx=16)
+
+        device_icon = ctk.CTkLabel(
+            center_frame,
+            text="⚡",
+            font=("", 11),
+            text_color=HelixTheme.COLORS["text_tertiary"],
+        )
+        device_icon.pack(side="left", padx=(0, 6))
+
         self.device_label = ctk.CTkLabel(
-            self,
-            text="Device: Checking...",
-            font=HelixTheme.FONTS["small"],
-            text_color=HelixTheme.COLORS["text_secondary"],
-        )
-        self.device_label.grid(row=0, column=0, padx=20, pady=5)
-
-        # Separator
-        sep1 = ctk.CTkLabel(
-            self,
-            text="|",
-            font=HelixTheme.FONTS["small"],
+            center_frame,
+            text="Detecting device...",
+            font=HelixTheme.FONTS["tiny"],
             text_color=HelixTheme.COLORS["text_tertiary"],
         )
-        sep1.grid(row=0, column=1, padx=5)
-
-        # Model info
-        self.model_label = ctk.CTkLabel(
-            self,
-            text="Model: None",
-            font=HelixTheme.FONTS["small"],
-            text_color=HelixTheme.COLORS["text_secondary"],
-        )
-        self.model_label.grid(row=0, column=2, padx=10, pady=5)
-
-        # Separator
-        sep2 = ctk.CTkLabel(
-            self,
-            text="|",
-            font=HelixTheme.FONTS["small"],
-            text_color=HelixTheme.COLORS["text_tertiary"],
-        )
-        sep2.grid(row=0, column=3, padx=5, sticky="w")
+        self.device_label.pack(side="left")
 
         # Spacer
         spacer = ctk.CTkFrame(self, fg_color="transparent")
-        spacer.grid(row=0, column=4, sticky="ew")
+        spacer.grid(row=0, column=3, sticky="ew")
+        self.grid_columnconfigure(3, weight=1)
 
-        # Status indicator
-        self.status_indicator = ctk.CTkLabel(
-            self,
-            text="●",
-            font=HelixTheme.FONTS["body"],
+        # Right section - Memory & Jobs
+        right_frame = ctk.CTkFrame(self, fg_color="transparent")
+        right_frame.grid(row=0, column=4, padx=16, sticky="e")
+
+        # Memory usage
+        self.memory_label = ctk.CTkLabel(
+            right_frame,
+            text="",
+            font=HelixTheme.FONTS["tiny"],
             text_color=HelixTheme.COLORS["text_tertiary"],
         )
-        self.status_indicator.grid(row=0, column=5, padx=5)
+        self.memory_label.pack(side="left", padx=(0, 16))
 
-        self.status_label = ctk.CTkLabel(
-            self,
-            text="Connecting...",
-            font=HelixTheme.FONTS["small"],
-            text_color=HelixTheme.COLORS["text_secondary"],
+        # Jobs indicator
+        self.jobs_label = ctk.CTkLabel(
+            right_frame,
+            text="",
+            font=HelixTheme.FONTS["tiny"],
+            text_color=HelixTheme.COLORS["text_tertiary"],
         )
-        self.status_label.grid(row=0, column=6, padx=(0, 20), pady=5)
+        self.jobs_label.pack(side="left")
+
+    def _add_divider(self, row: int, column: int):
+        """Add a subtle divider."""
+        divider = ctk.CTkFrame(
+            self,
+            fg_color=HelixTheme.COLORS["border_subtle"],
+            width=1,
+            height=16,
+        )
+        divider.grid(row=row, column=column, padx=8, pady=10)
 
     def update(self):
         """Update status bar with current system status."""
@@ -92,45 +117,81 @@ class StatusBar(ctk.CTkFrame):
             status = self.api_client.get_status()
 
             if status.get("status") == "ready":
-                self.status_indicator.configure(
-                    text_color=HelixTheme.COLORS["success"]
+                # Update status indicator
+                self.status_dot.configure(text_color=HelixTheme.COLORS["success"])
+                self.status_label.configure(
+                    text="Online",
+                    text_color=HelixTheme.COLORS["success"],
                 )
-                self.status_label.configure(text="Ready")
 
                 # Update device info
                 device = status.get("device", {})
-                device_text = f"{device.get('type', 'CPU').upper()}: {device.get('name', 'Unknown')}"
+                device_type = device.get("type", "CPU").upper()
+                device_name = device.get("name", "Unknown")
 
+                # Shorten device name if too long
+                if len(device_name) > 30:
+                    device_name = device_name[:27] + "..."
+
+                self.device_label.configure(
+                    text=f"{device_type}: {device_name}",
+                    text_color=HelixTheme.COLORS["text_secondary"],
+                )
+
+                # Update memory info
                 if device.get("total_memory"):
                     total_gb = device["total_memory"] / (1024**3)
                     used_gb = (device.get("allocated_memory", 0)) / (1024**3)
-                    device_text += f" | {used_gb:.1f}/{total_gb:.1f}GB"
+                    free_gb = total_gb - used_gb
+                    usage_pct = (used_gb / total_gb * 100) if total_gb > 0 else 0
 
-                self.device_label.configure(text=device_text)
+                    # Color code based on usage
+                    if usage_pct > 80:
+                        mem_color = HelixTheme.COLORS["error"]
+                    elif usage_pct > 60:
+                        mem_color = HelixTheme.COLORS["warning"]
+                    else:
+                        mem_color = HelixTheme.COLORS["text_secondary"]
 
-                # Update model count
-                models_loaded = status.get("models_loaded", 0)
-                models_total = status.get("models_total", 0)
-                self.model_label.configure(
-                    text=f"Models: {models_loaded}/{models_total} loaded"
-                )
+                    self.memory_label.configure(
+                        text=f"Memory: {used_gb:.1f}/{total_gb:.1f}GB ({usage_pct:.0f}%)",
+                        text_color=mem_color,
+                    )
+                else:
+                    self.memory_label.configure(text="")
+
+                # Update jobs info
+                jobs_running = status.get("jobs_running", 0)
+                jobs_pending = status.get("jobs_pending", 0)
+
+                if jobs_running > 0 or jobs_pending > 0:
+                    self.jobs_label.configure(
+                        text=f"Jobs: {jobs_running} running, {jobs_pending} pending",
+                        text_color=HelixTheme.COLORS["accent"],
+                    )
+                else:
+                    self.jobs_label.configure(text="")
 
             else:
-                self.status_indicator.configure(
-                    text_color=HelixTheme.COLORS["error"]
-                )
-                self.status_label.configure(text="Offline")
+                self._set_offline()
 
-        except Exception as e:
-            self.status_indicator.configure(
-                text_color=HelixTheme.COLORS["error"]
-            )
-            self.status_label.configure(text="Connection Error")
-            self.device_label.configure(text="Device: Unknown")
+        except Exception:
+            self._set_offline()
+
+    def _set_offline(self):
+        """Set status to offline."""
+        self.status_dot.configure(text_color=HelixTheme.COLORS["error"])
+        self.status_label.configure(
+            text="Offline",
+            text_color=HelixTheme.COLORS["error"],
+        )
+        self.device_label.configure(
+            text="Backend not connected",
+            text_color=HelixTheme.COLORS["text_tertiary"],
+        )
+        self.memory_label.configure(text="")
+        self.jobs_label.configure(text="")
 
     def set_model(self, model_name: Optional[str]):
-        """Set the current model name."""
-        if model_name:
-            self.model_label.configure(text=f"Model: {model_name}")
-        else:
-            self.model_label.configure(text="Model: None")
+        """Set the current model name (for future use)."""
+        pass

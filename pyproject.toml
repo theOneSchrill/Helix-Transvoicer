@@ -60,10 +60,8 @@ dev = [
     "ruff>=0.0.270",
     "mypy>=1.0.0",
 ]
-cuda = [
-    "torch>=2.0.0+cu118",
-    "torchaudio>=2.0.0+cu118",
-]
+# Note: For CUDA/GPU support, run: python install_cuda.py
+# CUDA packages require a special index URL and can't be specified here
 
 [project.scripts]
 helix = "helix_transvoicer.main:main"

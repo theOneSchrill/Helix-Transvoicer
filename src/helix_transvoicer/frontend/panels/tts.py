@@ -2,7 +2,12 @@
 Helix Transvoicer - TTS Studio Panel.
 """
 
+import io
+import queue
+import threading
 import customtkinter as ctk
+import numpy as np
+import soundfile as sf
 from pathlib import Path
 from tkinter import filedialog
 from typing import Optional
@@ -39,9 +44,33 @@ class TTSPanel(ctk.CTkFrame):
 
         self.api_client = api_client
         self._output_audio: Optional[bytes] = None
+        self._audio_array: Optional[np.ndarray] = None
+        self._sample_rate: int = 22050
+
+        # Thread-safe queue for UI updates
+        self._ui_queue: queue.Queue = queue.Queue()
 
         self._build_ui()
         self._refresh_voices()
+        self._start_queue_polling()
+
+    def _start_queue_polling(self):
+        """Start polling the UI update queue."""
+        self._process_ui_queue()
+
+    def _process_ui_queue(self):
+        """Process pending UI updates from background threads."""
+        try:
+            while True:
+                callback, args, kwargs = self._ui_queue.get_nowait()
+                callback(*args, **kwargs)
+        except queue.Empty:
+            pass
+        self.after(50, self._process_ui_queue)
+
+    def _queue_update(self, callback, *args, **kwargs):
+        """Queue a UI update from a background thread."""
+        self._ui_queue.put((callback, args, kwargs))
 
     def _build_ui(self):
         """Build the TTS panel UI."""
@@ -355,29 +384,73 @@ class TTSPanel(ctk.CTkFrame):
         if not voice_id or voice_id in ["No voices", "Loading...", "Error"]:
             return
 
+        # Capture values before starting thread
+        speed = self.speed_slider.get()
+        pitch = self.pitch_slider.get()
+        emotion = self.emotion_select.get().lower()
+        emotion_strength = self.emotion_strength.get()
+
         self.synth_btn.configure(state="disabled")
+        self.duration_label.configure(
+            text="Synthesizing...",
+            text_color=HelixTheme.COLORS["text_tertiary"],
+        )
 
-        try:
-            self._output_audio = self.api_client.synthesize_speech(
-                text=text,
-                voice_model_id=voice_id,
-                speed=self.speed_slider.get(),
-                pitch=self.pitch_slider.get(),
-                emotion=self.emotion_select.get().lower(),
-                emotion_strength=self.emotion_strength.get(),
-            )
+        def synthesis_worker():
+            try:
+                audio_bytes = self.api_client.synthesize_speech(
+                    text=text,
+                    voice_model_id=voice_id,
+                    speed=speed,
+                    pitch=pitch,
+                    emotion=emotion,
+                    emotion_strength=emotion_strength,
+                )
 
-            self.save_btn.configure(state="normal")
-            self.duration_label.configure(text="Synthesis complete")
+                # Convert bytes to numpy array
+                audio_array, sample_rate = sf.read(io.BytesIO(audio_bytes))
 
-        except Exception as e:
-            self.duration_label.configure(
-                text=f"Error: {str(e)[:30]}",
-                text_color=HelixTheme.COLORS["error"],
-            )
+                # Handle stereo by taking first channel
+                if len(audio_array.shape) > 1:
+                    audio_array = audio_array[:, 0]
 
-        finally:
-            self.synth_btn.configure(state="normal")
+                self._queue_update(
+                    self._on_synthesis_complete,
+                    audio_bytes, audio_array, sample_rate
+                )
+
+            except Exception as e:
+                self._queue_update(self._on_synthesis_error, str(e))
+
+        thread = threading.Thread(target=synthesis_worker, daemon=True)
+        thread.start()
+
+    def _on_synthesis_complete(self, audio_bytes: bytes, audio_array: np.ndarray, sample_rate: int):
+        """Handle successful synthesis (called on main thread)."""
+        self._output_audio = audio_bytes
+        self._audio_array = audio_array
+        self._sample_rate = sample_rate
+
+        # Update waveform display
+        self.waveform.set_audio(audio_array, sample_rate)
+
+        # Calculate duration
+        duration = len(audio_array) / sample_rate
+        self.duration_label.configure(
+            text=f"Duration: {duration:.1f}s",
+            text_color=HelixTheme.COLORS["text_tertiary"],
+        )
+
+        self.save_btn.configure(state="normal")
+        self.synth_btn.configure(state="normal")
+
+    def _on_synthesis_error(self, error_msg: str):
+        """Handle synthesis error (called on main thread)."""
+        self.duration_label.configure(
+            text=f"Error: {error_msg[:40]}",
+            text_color=HelixTheme.COLORS["error"],
+        )
+        self.synth_btn.configure(state="normal")
 
     def _on_preview(self):
         """Quick preview."""

@@ -20,6 +20,7 @@ class JobStatus(str, Enum):
 
     PENDING = "pending"
     RUNNING = "running"
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -50,6 +51,7 @@ class Job:
     result: Optional[Any] = None
     error: Optional[str] = None
     metadata: Dict = field(default_factory=dict)
+    _pause_event: Optional[asyncio.Event] = field(default=None, repr=False)
 
 
 class JobQueue:
@@ -93,12 +95,17 @@ class JobQueue:
         """
         job_id = str(uuid.uuid4())
 
+        # Create pause event (set = running, clear = paused)
+        pause_event = asyncio.Event()
+        pause_event.set()  # Start in running state
+
         job = Job(
             id=job_id,
             type=job_type,
             status=JobStatus.PENDING,
             created_at=datetime.now(),
             metadata=metadata or {},
+            _pause_event=pause_event,
         )
 
         self._jobs[job_id] = job
@@ -129,10 +136,12 @@ class JobQueue:
             job.started_at = datetime.now()
 
             try:
-                # Create progress callback
+                # Create progress callback that also checks for pause/cancel
                 def progress_callback(stage: str, progress: float):
                     job.stage = stage
                     job.progress = progress
+                    # Return pause event for sync code to check
+                    return job._pause_event
 
                 # Execute function
                 if asyncio.iscoroutinefunction(func):
@@ -201,6 +210,45 @@ class JobQueue:
 
         logger.info(f"Cancelled job {job_id}")
         return True
+
+    async def pause_job(self, job_id: str) -> bool:
+        """Pause a running job."""
+        job = self._jobs.get(job_id)
+        if not job:
+            return False
+
+        if job.status != JobStatus.RUNNING:
+            return False
+
+        # Clear the pause event to block the job
+        if job._pause_event:
+            job._pause_event.clear()
+
+        job.status = JobStatus.PAUSED
+        logger.info(f"Paused job {job_id}")
+        return True
+
+    async def resume_job(self, job_id: str) -> bool:
+        """Resume a paused job."""
+        job = self._jobs.get(job_id)
+        if not job:
+            return False
+
+        if job.status != JobStatus.PAUSED:
+            return False
+
+        # Set the pause event to unblock the job
+        if job._pause_event:
+            job._pause_event.set()
+
+        job.status = JobStatus.RUNNING
+        logger.info(f"Resumed job {job_id}")
+        return True
+
+    def is_paused(self, job_id: str) -> bool:
+        """Check if a job is paused."""
+        job = self._jobs.get(job_id)
+        return job.status == JobStatus.PAUSED if job else False
 
     async def wait_for_job(
         self,

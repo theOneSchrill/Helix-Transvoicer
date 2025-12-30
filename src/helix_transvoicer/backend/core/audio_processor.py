@@ -34,6 +34,7 @@ class ProcessingConfig:
     denoise_strength: float = 0.5
     min_duration: float = 0.5  # seconds
     max_duration: float = 300.0  # seconds
+    skip_max_duration_check: bool = False  # Skip max duration validation (for training with auto-split)
 
 
 @dataclass
@@ -101,7 +102,7 @@ class AudioProcessor:
                 f"Audio too short: {original_duration:.2f}s < {cfg.min_duration}s minimum"
             )
 
-        if original_duration > cfg.max_duration:
+        if not cfg.skip_max_duration_check and original_duration > cfg.max_duration:
             raise ValueError(
                 f"Audio too long: {original_duration:.2f}s > {cfg.max_duration}s maximum"
             )

@@ -10,7 +10,7 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 
-from helix_transvoicer.backend.core.audio_processor import AudioProcessor, ProcessedAudio
+from helix_transvoicer.backend.core.audio_processor import AudioProcessor, ProcessedAudio, ProcessingConfig
 from helix_transvoicer.backend.core.emotion_analyzer import EmotionAnalyzer
 from helix_transvoicer.backend.models.encoder import ContentEncoder, SpeakerEncoder
 from helix_transvoicer.backend.models.decoder import VoiceDecoder
@@ -209,23 +209,36 @@ class ModelTrainer:
         self.device = device or torch.device("cpu")
         self.models_dir = models_dir or self.settings.models_dir
 
-        self.audio_processor = AudioProcessor()
+        # Use config that allows long audio (will be split later)
+        training_config = ProcessingConfig(skip_max_duration_check=True)
+        self.audio_processor = AudioProcessor(config=training_config)
         self.emotion_analyzer = EmotionAnalyzer(device=self.device)
 
         self._current_training: Optional[Dict] = None
+        self._pause_event: Optional[Any] = None  # Set by job queue
 
     def prepare_samples(
         self,
         audio_paths: List[Union[str, Path]],
         progress_callback: Optional[Callable[[str, float], None]] = None,
+        remove_silence: bool = True,
+        max_chunk_duration: float = 300.0,
     ) -> List[TrainingSample]:
         """
         Prepare training samples from audio files.
 
-        Processes audio and analyzes emotions.
+        Processes audio, removes silence, auto-splits long files, and analyzes emotions.
+
+        Args:
+            audio_paths: List of paths to audio files
+            progress_callback: Callback for progress updates
+            remove_silence: Whether to remove silent segments (speeds up training)
+            max_chunk_duration: Maximum duration per audio chunk (seconds), longer files are auto-split
         """
         samples = []
         total = len(audio_paths)
+        total_original_duration = 0
+        total_processed_duration = 0
 
         for i, path in enumerate(audio_paths):
             try:
@@ -234,25 +247,56 @@ class ModelTrainer:
 
                 # Process audio
                 processed = self.audio_processor.process(path)
+                audio = processed.audio
+                original_duration = processed.duration
+                total_original_duration += original_duration
 
-                # Analyze emotion
-                emotions = self.emotion_analyzer.analyze(
-                    processed.audio,
-                    processed.sample_rate,
-                )
-                primary_emotion = max(emotions, key=emotions.get)
-                emotion_confidence = emotions[primary_emotion]
+                # Remove silence to speed up training
+                if remove_silence:
+                    audio = AudioUtils.remove_silence(
+                        audio,
+                        sample_rate=processed.sample_rate,
+                        top_db=30.0,  # Threshold for silence detection
+                        min_silence_duration=0.1,  # Remove silences > 100ms
+                        keep_short_silence=0.05,  # Keep 50ms gaps between segments
+                    )
 
-                sample = TrainingSample(
-                    audio=processed.audio,
+                # Auto-split long audio into smaller chunks
+                audio_chunks = AudioUtils.split_long_audio(
+                    audio,
                     sample_rate=processed.sample_rate,
-                    duration=processed.duration,
-                    emotion=primary_emotion,
-                    emotion_confidence=emotion_confidence,
-                    quality_score=processed.quality_score,
-                    source_path=str(path),
+                    max_duration=max_chunk_duration,
+                    overlap=1.0,  # 1 second overlap between chunks
                 )
-                samples.append(sample)
+
+                # Create a sample for each chunk
+                for chunk_idx, chunk_audio in enumerate(audio_chunks):
+                    chunk_duration = len(chunk_audio) / processed.sample_rate
+                    total_processed_duration += chunk_duration
+
+                    # Analyze emotion for this chunk
+                    emotions = self.emotion_analyzer.analyze(
+                        chunk_audio,
+                        processed.sample_rate,
+                    )
+                    primary_emotion = max(emotions, key=emotions.get)
+                    emotion_confidence = emotions[primary_emotion]
+
+                    # Add chunk identifier to source path if split
+                    source_path = str(path)
+                    if len(audio_chunks) > 1:
+                        source_path = f"{path} (chunk {chunk_idx + 1}/{len(audio_chunks)})"
+
+                    sample = TrainingSample(
+                        audio=chunk_audio,
+                        sample_rate=processed.sample_rate,
+                        duration=chunk_duration,
+                        emotion=primary_emotion,
+                        emotion_confidence=emotion_confidence,
+                        quality_score=processed.quality_score,
+                        source_path=source_path,
+                    )
+                    samples.append(sample)
 
             except Exception as e:
                 logger.error(f"Failed to prepare sample {path}: {e}")
@@ -260,6 +304,19 @@ class ModelTrainer:
 
         if progress_callback:
             progress_callback("Preparation complete", 1.0)
+
+        # Log total processing summary
+        if total_original_duration > 0:
+            removed_pct = (1 - total_processed_duration / total_original_duration) * 100
+            logger.info(f"Total audio: {total_original_duration:.1f}s -> {total_processed_duration:.1f}s "
+                        f"({removed_pct:.0f}% silence removed)")
+            logger.info(f"Created {len(samples)} training samples from {len(audio_paths)} files")
+
+        # Free emotion analyzer GPU memory before training
+        del self.emotion_analyzer
+        self.emotion_analyzer = None
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
 
         return samples
 
@@ -302,6 +359,12 @@ class ModelTrainer:
         logger.info(f"Starting training for model: {config.model_name}")
         logger.info(f"Samples: {len(samples)}, Epochs: {config.epochs}")
 
+        # Clear GPU memory before training
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            logger.info("Cleared GPU memory cache")
+
         # Create model directory
         model_dir = self.models_dir / config.model_name
         model_dir.mkdir(parents=True, exist_ok=True)
@@ -310,16 +373,46 @@ class ModelTrainer:
         dataset = VoiceDataset(samples, augment=config.augment_data)
         dataloader = DataLoader(
             dataset,
-            batch_size=min(config.batch_size, len(samples)),
+            batch_size=min(config.batch_size, len(dataset)),  # Use dataset length, not samples
             shuffle=True,
             num_workers=0,
             pin_memory=self.device.type == "cuda",
         )
 
-        # Initialize models
-        content_encoder = ContentEncoder().to(self.device)
-        speaker_encoder = SpeakerEncoder(input_dim=self.settings.n_mels).to(self.device)
-        decoder = VoiceDecoder(n_mels=self.settings.n_mels).to(self.device)
+        # Check available GPU memory and use smaller models if needed
+        low_memory_mode = False
+        if self.device.type == "cuda":
+            props = torch.cuda.get_device_properties(0)
+            total_mem = props.total_memory / 1e9
+            allocated_mem = torch.cuda.memory_allocated(0) / 1e9
+            logger.info(f"GPU: {props.name}, Total: {total_mem:.1f}GB, Allocated: {allocated_mem:.2f}GB")
+            # Enable low memory mode for GPUs with 10GB or less (covers 8GB cards that report ~8.6GB)
+            if total_mem <= 10.0:
+                low_memory_mode = True
+                logger.info(f"Low memory mode enabled ({total_mem:.1f}GB GPU)")
+
+        # Initialize models (smaller versions for low memory GPUs)
+        if low_memory_mode:
+            # VERY small models for 8GB GPUs: hidden_dim=64, num_layers=1
+            logger.info("Using minimal model architecture for low memory GPU")
+            content_encoder = ContentEncoder(hidden_dim=64, output_dim=64, num_layers=1).to(self.device)
+            speaker_encoder = SpeakerEncoder(input_dim=self.settings.n_mels, hidden_dim=64, embedding_dim=64).to(self.device)
+            decoder = VoiceDecoder(content_dim=64, speaker_dim=64, hidden_dim=128, n_mels=self.settings.n_mels, num_layers=1).to(self.device)
+
+            # Force smaller batch size for low memory mode
+            if config.batch_size > 4:
+                logger.info(f"Reducing batch size from {config.batch_size} to 4 for low memory mode")
+                dataloader = DataLoader(
+                    dataset,
+                    batch_size=min(4, len(dataset)),
+                    shuffle=True,
+                    num_workers=0,
+                    pin_memory=False,  # Disable pin_memory to save memory
+                )
+        else:
+            content_encoder = ContentEncoder().to(self.device)
+            speaker_encoder = SpeakerEncoder(input_dim=self.settings.n_mels).to(self.device)
+            decoder = VoiceDecoder(n_mels=self.settings.n_mels).to(self.device)
 
         # Initialize optimizer
         params = (
@@ -343,15 +436,31 @@ class ModelTrainer:
         # Loss function
         criterion = nn.MSELoss()
 
+        # Mixed precision training for memory efficiency (halves GPU memory usage)
+        use_amp = self.device.type == "cuda"
+        scaler = torch.amp.GradScaler("cuda") if use_amp else None
+        if use_amp:
+            logger.info("Using mixed precision training (float16)")
+
         # Training loop
         final_loss = 0.0
         self._current_training = {"active": True}
 
         try:
             for epoch in range(config.epochs):
+                # Check for cancellation
                 if not self._current_training.get("active", True):
                     logger.info("Training cancelled")
                     break
+
+                # Check for pause - wait until resumed
+                if self._pause_event is not None:
+                    while not self._pause_event.is_set():
+                        if not self._current_training.get("active", True):
+                            logger.info("Training cancelled while paused")
+                            break
+                        import time
+                        time.sleep(0.1)  # Poll every 100ms
 
                 epoch_loss = 0.0
                 content_encoder.train()
@@ -364,29 +473,36 @@ class ModelTrainer:
 
                     optimizer.zero_grad()
 
-                    # Extract content features from audio
-                    content_features = content_encoder(audio)  # [batch, time, 256]
+                    # Use automatic mixed precision for forward pass
+                    with torch.amp.autocast("cuda", enabled=use_amp):
+                        # Extract content features from audio
+                        content_features = content_encoder(audio)  # [batch, time, 256]
 
-                    # Extract speaker embedding from mel
-                    speaker_embedding = speaker_encoder(mel)  # [batch, 256]
+                        # Extract speaker embedding from mel
+                        speaker_embedding = speaker_encoder(mel)  # [batch, 256]
 
-                    # Decode to mel spectrogram
-                    reconstructed = decoder(content_features, speaker_embedding)  # [batch, time, n_mels]
+                        # Decode to mel spectrogram
+                        reconstructed = decoder(content_features, speaker_embedding)  # [batch, time, n_mels]
 
-                    # Target mel needs to match reconstructed shape [batch, time, n_mels]
-                    target_mel = mel.transpose(1, 2)  # [batch, time, n_mels]
+                        # Target mel needs to match reconstructed shape [batch, time, n_mels]
+                        target_mel = mel.transpose(1, 2)  # [batch, time, n_mels]
 
-                    # Match sequence lengths (content encoder downsamples audio)
-                    min_len = min(reconstructed.shape[1], target_mel.shape[1])
-                    reconstructed = reconstructed[:, :min_len, :]
-                    target_mel = target_mel[:, :min_len, :]
+                        # Match sequence lengths (content encoder downsamples audio)
+                        min_len = min(reconstructed.shape[1], target_mel.shape[1])
+                        reconstructed = reconstructed[:, :min_len, :]
+                        target_mel = target_mel[:, :min_len, :]
 
-                    # Compute loss
-                    loss = criterion(reconstructed, target_mel)
+                        # Compute loss
+                        loss = criterion(reconstructed, target_mel)
 
-                    # Backward pass
-                    loss.backward()
-                    optimizer.step()
+                    # Backward pass with gradient scaling for mixed precision
+                    if scaler is not None:
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        loss.backward()
+                        optimizer.step()
 
                     epoch_loss += loss.item()
 
@@ -453,6 +569,9 @@ class ModelTrainer:
 
         finally:
             self._current_training = None
+            # Clear GPU memory after training
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
 
         # Compute speaker embedding from all samples
         speaker_embedding = self._compute_speaker_embedding(
@@ -469,6 +588,7 @@ class ModelTrainer:
             speaker_embedding,
             config,
             samples,
+            low_memory_mode=low_memory_mode,
         )
 
         # Compute emotion coverage
@@ -597,6 +717,7 @@ class ModelTrainer:
         speaker_embedding: np.ndarray,
         config: TrainingConfig,
         samples: List[TrainingSample],
+        low_memory_mode: bool = False,
     ):
         """Save model to disk."""
         # Save model weights
@@ -607,7 +728,7 @@ class ModelTrainer:
         # Save speaker embedding
         np.save(model_dir / "speaker_embedding.npy", speaker_embedding)
 
-        # Save config
+        # Save training config
         with open(model_dir / "config.json", "w") as f:
             json.dump(
                 {
@@ -619,6 +740,25 @@ class ModelTrainer:
                 indent=2,
             )
 
+        # Save model architecture config (critical for loading correctly)
+        if low_memory_mode:
+            arch_config = {
+                "low_memory_mode": True,
+                "content_encoder": {"hidden_dim": 64, "output_dim": 64, "num_layers": 1},
+                "speaker_encoder": {"hidden_dim": 64, "embedding_dim": 64},
+                "decoder": {"content_dim": 64, "speaker_dim": 64, "hidden_dim": 128, "num_layers": 1},
+            }
+        else:
+            arch_config = {
+                "low_memory_mode": False,
+                "content_encoder": {"hidden_dim": 256, "output_dim": 256, "num_layers": 3},
+                "speaker_encoder": {"hidden_dim": 256, "embedding_dim": 256},
+                "decoder": {"content_dim": 256, "speaker_dim": 256, "hidden_dim": 512, "num_layers": 3},
+            }
+
+        with open(model_dir / "architecture.json", "w") as f:
+            json.dump(arch_config, f, indent=2)
+
         # Save metadata
         metadata = {
             "model_id": config.model_name,
@@ -628,6 +768,7 @@ class ModelTrainer:
             "total_samples": len(samples),
             "total_duration": sum(s.duration for s in samples),
             "emotion_coverage": self._compute_emotion_coverage(samples),
+            "low_memory_mode": low_memory_mode,
         }
 
         with open(model_dir / "metadata.json", "w") as f:
@@ -660,9 +801,39 @@ class ModelTrainer:
         model_dir: Path,
     ) -> Tuple[ContentEncoder, SpeakerEncoder, VoiceDecoder]:
         """Load model from disk."""
-        content_encoder = ContentEncoder().to(self.device)
-        speaker_encoder = SpeakerEncoder(input_dim=self.settings.n_mels).to(self.device)
-        decoder = VoiceDecoder(n_mels=self.settings.n_mels).to(self.device)
+        # Load architecture config to create model with correct dimensions
+        arch_config = self._load_architecture_config(model_dir)
+
+        if arch_config and arch_config.get("low_memory_mode", False):
+            # Create low memory mode models
+            ce_cfg = arch_config.get("content_encoder", {})
+            se_cfg = arch_config.get("speaker_encoder", {})
+            dec_cfg = arch_config.get("decoder", {})
+
+            content_encoder = ContentEncoder(
+                hidden_dim=ce_cfg.get("hidden_dim", 64),
+                output_dim=ce_cfg.get("output_dim", 64),
+                num_layers=ce_cfg.get("num_layers", 1),
+            ).to(self.device)
+
+            speaker_encoder = SpeakerEncoder(
+                input_dim=self.settings.n_mels,
+                hidden_dim=se_cfg.get("hidden_dim", 64),
+                embedding_dim=se_cfg.get("embedding_dim", 64),
+            ).to(self.device)
+
+            decoder = VoiceDecoder(
+                content_dim=dec_cfg.get("content_dim", 64),
+                speaker_dim=dec_cfg.get("speaker_dim", 64),
+                hidden_dim=dec_cfg.get("hidden_dim", 128),
+                n_mels=self.settings.n_mels,
+                num_layers=dec_cfg.get("num_layers", 1),
+            ).to(self.device)
+        else:
+            # Create default models
+            content_encoder = ContentEncoder().to(self.device)
+            speaker_encoder = SpeakerEncoder(input_dim=self.settings.n_mels).to(self.device)
+            decoder = VoiceDecoder(n_mels=self.settings.n_mels).to(self.device)
 
         content_encoder.load_state_dict(
             torch.load(model_dir / "content_encoder.pt", map_location=self.device)
@@ -675,6 +846,14 @@ class ModelTrainer:
         )
 
         return content_encoder, speaker_encoder, decoder
+
+    def _load_architecture_config(self, model_dir: Path) -> Optional[Dict]:
+        """Load model architecture configuration."""
+        arch_path = model_dir / "architecture.json"
+        if arch_path.exists():
+            with open(arch_path, "r") as f:
+                return json.load(f)
+        return None
 
     def _load_metadata(self, model_dir: Path) -> Dict:
         """Load model metadata."""

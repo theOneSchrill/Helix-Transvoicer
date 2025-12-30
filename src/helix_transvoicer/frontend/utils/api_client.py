@@ -60,6 +60,18 @@ class APIClient:
         response.raise_for_status()
         return response.json()
 
+    def pause_job(self, job_id: str) -> Dict:
+        """Pause a job."""
+        response = self._client.post(self._url(f"/api/system/jobs/{job_id}/pause"))
+        response.raise_for_status()
+        return response.json()
+
+    def resume_job(self, job_id: str) -> Dict:
+        """Resume a paused job."""
+        response = self._client.post(self._url(f"/api/system/jobs/{job_id}/resume"))
+        response.raise_for_status()
+        return response.json()
+
     # Model endpoints
 
     def list_models(self) -> List[Dict]:
@@ -95,6 +107,8 @@ class APIClient:
         audio_files: List[Path],
         epochs: int = 100,
         batch_size: int = 16,
+        remove_silence: bool = True,
+        auto_split: bool = True,
     ) -> Dict:
         """Start model training."""
         files = [
@@ -109,6 +123,8 @@ class APIClient:
                 params={
                     "epochs": epochs,
                     "batch_size": batch_size,
+                    "remove_silence": remove_silence,
+                    "auto_split": auto_split,
                 },
                 timeout=300.0,
             )
