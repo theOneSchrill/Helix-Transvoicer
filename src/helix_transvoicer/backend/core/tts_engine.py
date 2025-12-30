@@ -423,6 +423,7 @@ class TTSEngine:
         # Initialize models (lazy loading)
         self._acoustic_model: Optional[AcousticModel] = None
         self._vocoder: Optional[Vocoder] = None
+        self._current_speaker_dim: int = 256  # Track current speaker dimension
 
         # Emotion embeddings
         self._emotion_embeddings = self._create_emotion_embeddings()
@@ -430,13 +431,20 @@ class TTSEngine:
         # Cache for loaded speaker embeddings
         self._speaker_cache: Dict[str, torch.Tensor] = {}
 
+    def _get_acoustic_model(self, speaker_dim: int = 256) -> AcousticModel:
+        """Get acoustic model with correct speaker dimension."""
+        # Reinitialize if speaker dimension changed
+        if self._acoustic_model is None or self._current_speaker_dim != speaker_dim:
+            logger.info(f"Initializing acoustic model with speaker_dim={speaker_dim}")
+            self._acoustic_model = AcousticModel(speaker_dim=speaker_dim).to(self.device)
+            self._acoustic_model.eval()
+            self._current_speaker_dim = speaker_dim
+        return self._acoustic_model
+
     @property
     def acoustic_model(self) -> AcousticModel:
-        """Lazy-load acoustic model."""
-        if self._acoustic_model is None:
-            self._acoustic_model = AcousticModel().to(self.device)
-            self._acoustic_model.eval()
-        return self._acoustic_model
+        """Lazy-load acoustic model with default dimension."""
+        return self._get_acoustic_model(speaker_dim=256)
 
     @property
     def vocoder(self) -> Vocoder:
@@ -505,6 +513,9 @@ class TTSEngine:
         # Get speaker embedding
         speaker_embedding = self._get_speaker_embedding(voice_model_id)
 
+        # Detect speaker embedding dimension and get matching acoustic model
+        speaker_dim = speaker_embedding.shape[-1]
+
         # Get emotion embedding
         emotion_embedding = self._get_emotion_embedding(
             cfg.emotion,
@@ -515,9 +526,12 @@ class TTSEngine:
 
         update_progress("Generating speech", 0.5)
 
+        # Get acoustic model with correct speaker dimension
+        acoustic_model = self._get_acoustic_model(speaker_dim=speaker_dim)
+
         # Generate mel spectrogram
         with torch.no_grad():
-            mel, durations, pitch = self.acoustic_model(
+            mel, durations, pitch = acoustic_model(
                 phoneme_tensor,
                 speaker_embedding.unsqueeze(0),
                 emotion_embedding.unsqueeze(0),
@@ -620,12 +634,26 @@ class TTSEngine:
         if embedding_path.exists():
             embedding = np.load(str(embedding_path))
             embedding_tensor = torch.from_numpy(embedding).float().to(self.device)
+            logger.info(f"Loaded speaker embedding for {model_id}: dim={embedding_tensor.shape[-1]}")
             self._speaker_cache[model_id] = embedding_tensor
             return embedding_tensor
 
+        # Check architecture.json to determine default dimension
+        default_dim = 256
+        arch_path = model_dir / "architecture.json"
+        if arch_path.exists():
+            try:
+                import json
+                with open(arch_path, "r") as f:
+                    arch = json.load(f)
+                    if arch.get("low_memory_mode", False):
+                        default_dim = arch.get("speaker_encoder", {}).get("embedding_dim", 64)
+            except Exception:
+                pass
+
         # Return default embedding
-        logger.warning(f"Speaker embedding not found for {model_id}")
-        return torch.zeros(256, device=self.device)
+        logger.warning(f"Speaker embedding not found for {model_id}, using zeros (dim={default_dim})")
+        return torch.zeros(default_dim, device=self.device)
 
     def _get_emotion_embedding(
         self,
