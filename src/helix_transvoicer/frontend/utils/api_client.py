@@ -60,6 +60,18 @@ class APIClient:
         response.raise_for_status()
         return response.json()
 
+    def pause_job(self, job_id: str) -> Dict:
+        """Pause a job."""
+        response = self._client.post(self._url(f"/api/system/jobs/{job_id}/pause"))
+        response.raise_for_status()
+        return response.json()
+
+    def resume_job(self, job_id: str) -> Dict:
+        """Resume a paused job."""
+        response = self._client.post(self._url(f"/api/system/jobs/{job_id}/resume"))
+        response.raise_for_status()
+        return response.json()
+
     # Model endpoints
 
     def list_models(self) -> List[Dict]:

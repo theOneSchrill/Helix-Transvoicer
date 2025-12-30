@@ -10,7 +10,7 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -213,22 +213,25 @@ class ModelTrainer:
         self.emotion_analyzer = EmotionAnalyzer(device=self.device)
 
         self._current_training: Optional[Dict] = None
+        self._pause_event: Optional[Any] = None  # Set by job queue
 
     def prepare_samples(
         self,
         audio_paths: List[Union[str, Path]],
         progress_callback: Optional[Callable[[str, float], None]] = None,
         remove_silence: bool = True,
+        max_chunk_duration: float = 300.0,
     ) -> List[TrainingSample]:
         """
         Prepare training samples from audio files.
 
-        Processes audio, removes silence, and analyzes emotions.
+        Processes audio, removes silence, auto-splits long files, and analyzes emotions.
 
         Args:
             audio_paths: List of paths to audio files
             progress_callback: Callback for progress updates
             remove_silence: Whether to remove silent segments (speeds up training)
+            max_chunk_duration: Maximum duration per audio chunk (seconds), longer files are auto-split
         """
         samples = []
         total = len(audio_paths)
@@ -256,27 +259,42 @@ class ModelTrainer:
                         keep_short_silence=0.05,  # Keep 50ms gaps between segments
                     )
 
-                processed_duration = len(audio) / processed.sample_rate
-                total_processed_duration += processed_duration
-
-                # Analyze emotion
-                emotions = self.emotion_analyzer.analyze(
+                # Auto-split long audio into smaller chunks
+                audio_chunks = AudioUtils.split_long_audio(
                     audio,
-                    processed.sample_rate,
-                )
-                primary_emotion = max(emotions, key=emotions.get)
-                emotion_confidence = emotions[primary_emotion]
-
-                sample = TrainingSample(
-                    audio=audio,
                     sample_rate=processed.sample_rate,
-                    duration=processed_duration,
-                    emotion=primary_emotion,
-                    emotion_confidence=emotion_confidence,
-                    quality_score=processed.quality_score,
-                    source_path=str(path),
+                    max_duration=max_chunk_duration,
+                    overlap=1.0,  # 1 second overlap between chunks
                 )
-                samples.append(sample)
+
+                # Create a sample for each chunk
+                for chunk_idx, chunk_audio in enumerate(audio_chunks):
+                    chunk_duration = len(chunk_audio) / processed.sample_rate
+                    total_processed_duration += chunk_duration
+
+                    # Analyze emotion for this chunk
+                    emotions = self.emotion_analyzer.analyze(
+                        chunk_audio,
+                        processed.sample_rate,
+                    )
+                    primary_emotion = max(emotions, key=emotions.get)
+                    emotion_confidence = emotions[primary_emotion]
+
+                    # Add chunk identifier to source path if split
+                    source_path = str(path)
+                    if len(audio_chunks) > 1:
+                        source_path = f"{path} (chunk {chunk_idx + 1}/{len(audio_chunks)})"
+
+                    sample = TrainingSample(
+                        audio=chunk_audio,
+                        sample_rate=processed.sample_rate,
+                        duration=chunk_duration,
+                        emotion=primary_emotion,
+                        emotion_confidence=emotion_confidence,
+                        quality_score=processed.quality_score,
+                        source_path=source_path,
+                    )
+                    samples.append(sample)
 
             except Exception as e:
                 logger.error(f"Failed to prepare sample {path}: {e}")
@@ -285,11 +303,12 @@ class ModelTrainer:
         if progress_callback:
             progress_callback("Preparation complete", 1.0)
 
-        # Log total silence removed
-        if remove_silence and total_original_duration > 0:
+        # Log total processing summary
+        if total_original_duration > 0:
             removed_pct = (1 - total_processed_duration / total_original_duration) * 100
             logger.info(f"Total audio: {total_original_duration:.1f}s -> {total_processed_duration:.1f}s "
                         f"({removed_pct:.0f}% silence removed)")
+            logger.info(f"Created {len(samples)} training samples from {len(audio_paths)} files")
 
         return samples
 
@@ -379,9 +398,19 @@ class ModelTrainer:
 
         try:
             for epoch in range(config.epochs):
+                # Check for cancellation
                 if not self._current_training.get("active", True):
                     logger.info("Training cancelled")
                     break
+
+                # Check for pause - wait until resumed
+                if self._pause_event is not None:
+                    while not self._pause_event.is_set():
+                        if not self._current_training.get("active", True):
+                            logger.info("Training cancelled while paused")
+                            break
+                        import time
+                        time.sleep(0.1)  # Poll every 100ms
 
                 epoch_loss = 0.0
                 content_encoder.train()

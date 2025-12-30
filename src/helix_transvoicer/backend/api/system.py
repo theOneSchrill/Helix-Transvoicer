@@ -156,6 +156,34 @@ async def cancel_job(request: Request, job_id: str):
     return {"status": "cancelled"}
 
 
+@router.post("/jobs/{job_id}/pause")
+async def pause_job(request: Request, job_id: str):
+    """Pause a running job."""
+    from fastapi import HTTPException
+
+    job_queue = request.app.state.job_queue
+
+    success = await job_queue.pause_job(job_id)
+    if not success:
+        raise HTTPException(status_code=400, detail="Could not pause job")
+
+    return {"status": "paused"}
+
+
+@router.post("/jobs/{job_id}/resume")
+async def resume_job(request: Request, job_id: str):
+    """Resume a paused job."""
+    from fastapi import HTTPException
+
+    job_queue = request.app.state.job_queue
+
+    success = await job_queue.resume_job(job_id)
+    if not success:
+        raise HTTPException(status_code=400, detail="Could not resume job")
+
+    return {"status": "resumed"}
+
+
 @router.post("/cache/clear")
 async def clear_cache(request: Request):
     """Clear GPU memory cache."""

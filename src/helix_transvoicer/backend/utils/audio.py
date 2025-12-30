@@ -5,7 +5,7 @@ Helix Transvoicer - Audio utility functions.
 import io
 import logging
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import librosa
 import numpy as np
@@ -215,6 +215,55 @@ class AudioUtils:
                     f"({(1 - len(result)/len(audio))*100:.0f}% removed)")
 
         return result
+
+    @staticmethod
+    def split_long_audio(
+        audio: np.ndarray,
+        sample_rate: int = 22050,
+        max_duration: float = 300.0,
+        overlap: float = 1.0,
+    ) -> List[np.ndarray]:
+        """
+        Split long audio into smaller chunks.
+
+        Args:
+            audio: Audio samples
+            sample_rate: Sample rate
+            max_duration: Maximum duration per chunk (seconds)
+            overlap: Overlap between chunks (seconds) for continuity
+
+        Returns:
+            List of audio chunks
+        """
+        duration = len(audio) / sample_rate
+
+        if duration <= max_duration:
+            return [audio]
+
+        max_samples = int(max_duration * sample_rate)
+        overlap_samples = int(overlap * sample_rate)
+        hop_samples = max_samples - overlap_samples
+
+        chunks = []
+        start = 0
+
+        while start < len(audio):
+            end = min(start + max_samples, len(audio))
+            chunk = audio[start:end]
+
+            # Only add chunks that are at least 1 second long
+            if len(chunk) >= sample_rate:
+                chunks.append(chunk)
+
+            start += hop_samples
+
+            # Avoid tiny final chunks
+            if len(audio) - start < sample_rate:
+                break
+
+        logger.info(f"Split {duration:.1f}s audio into {len(chunks)} chunks of ~{max_duration:.0f}s each")
+
+        return chunks
 
     @staticmethod
     def compute_mel_spectrogram(

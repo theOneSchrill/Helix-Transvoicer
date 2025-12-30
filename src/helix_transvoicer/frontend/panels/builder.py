@@ -7,7 +7,7 @@ import threading
 import time
 import customtkinter as ctk
 from pathlib import Path
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 from typing import List, Optional
 
 from helix_transvoicer.frontend.styles.theme import HelixTheme
@@ -38,6 +38,7 @@ class BuilderPanel(ctk.CTkFrame):
         self._samples: List[Path] = []
         self._model_name: str = ""
         self._training_active = False
+        self._training_paused = False
         self._current_job_id = None
 
         # Thread-safe queue for UI updates (tkinter is NOT thread-safe)
@@ -101,7 +102,34 @@ class BuilderPanel(ctk.CTkFrame):
             **HelixTheme.get_button_style("primary"),
             command=self._on_train,
         )
-        self.train_btn.pack(fill="x", padx=20, pady=20)
+        self.train_btn.pack(fill="x", padx=20, pady=(20, 10))
+
+        # Training control buttons (hidden by default)
+        self.controls_frame = ctk.CTkFrame(side_frame, fg_color="transparent")
+        self.controls_frame.pack(fill="x", padx=20, pady=(0, 20))
+
+        self.pause_btn = ctk.CTkButton(
+            self.controls_frame,
+            text="⏸ Pause",
+            height=40,
+            **HelixTheme.get_button_style("secondary"),
+            command=self._on_pause_resume,
+        )
+        self.pause_btn.pack(side="left", expand=True, fill="x", padx=(0, 5))
+
+        self.cancel_btn = ctk.CTkButton(
+            self.controls_frame,
+            text="✕ Cancel",
+            height=40,
+            fg_color=HelixTheme.COLORS["error"],
+            hover_color="#b02020",
+            text_color="white",
+            command=self._on_cancel,
+        )
+        self.cancel_btn.pack(side="left", expand=True, fill="x", padx=(5, 0))
+
+        # Initially hide control buttons
+        self.controls_frame.pack_forget()
 
     def _build_project_section(self, parent):
         """Build project section."""
@@ -426,6 +454,11 @@ class BuilderPanel(ctk.CTkFrame):
         self.train_btn.configure(state="disabled")
         self._current_job_id = None
         self._training_active = True
+        self._training_paused = False
+
+        # Show control buttons
+        self.pause_btn.configure(text="⏸ Pause")
+        self.controls_frame.pack(fill="x", padx=20, pady=(0, 20))
 
         # Single background thread handles upload + polling
         def training_worker():
@@ -486,13 +519,80 @@ class BuilderPanel(ctk.CTkFrame):
     def _on_train_complete(self, result):
         """Handle training completion (called from main thread)."""
         self._training_active = False
+        self._training_paused = False
         self.progress.set_complete()
         self.train_btn.configure(state="normal")
+        self.controls_frame.pack_forget()
         self._current_job_id = None
 
     def _on_train_error(self, error_msg: str):
         """Handle training error (called from main thread)."""
         self._training_active = False
+        self._training_paused = False
         self.progress.set_error(error_msg[:50])
         self.train_btn.configure(state="normal")
+        self.controls_frame.pack_forget()
         self._current_job_id = None
+
+    def _on_pause_resume(self):
+        """Toggle pause/resume training."""
+        if not self._current_job_id:
+            return
+
+        if self._training_paused:
+            # Resume
+            try:
+                self.api_client.resume_job(self._current_job_id)
+                self._training_paused = False
+                self.pause_btn.configure(text="⏸ Pause")
+                self.progress.set_stage("Resuming...")
+            except Exception as e:
+                self.progress.set_error(f"Resume failed: {str(e)[:30]}")
+        else:
+            # Pause
+            try:
+                self.api_client.pause_job(self._current_job_id)
+                self._training_paused = True
+                self.pause_btn.configure(text="▶ Resume")
+                self.progress.set_stage("Paused")
+            except Exception as e:
+                self.progress.set_error(f"Pause failed: {str(e)[:30]}")
+
+    def _on_cancel(self):
+        """Cancel training with confirmation."""
+        if not self._current_job_id:
+            return
+
+        # Show confirmation dialog
+        result = messagebox.askyesno(
+            "Cancel Training",
+            "Are you sure you want to cancel training?\n\n"
+            "This will delete the partially trained model.",
+            icon="warning",
+        )
+
+        if not result:
+            return
+
+        model_name = self.name_entry.get().strip()
+
+        try:
+            # Cancel the job
+            self.api_client.cancel_job(self._current_job_id)
+
+            # Delete the partial model
+            if model_name:
+                try:
+                    self.api_client.delete_model(model_name)
+                except Exception:
+                    pass  # Model might not exist yet
+
+            self._training_active = False
+            self._training_paused = False
+            self.progress.set_error("Training cancelled")
+            self.train_btn.configure(state="normal")
+            self.controls_frame.pack_forget()
+            self._current_job_id = None
+
+        except Exception as e:
+            self.progress.set_error(f"Cancel failed: {str(e)[:30]}")

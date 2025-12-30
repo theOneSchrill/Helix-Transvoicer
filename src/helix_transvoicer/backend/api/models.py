@@ -188,8 +188,9 @@ async def train_model(
             models_dir=model_manager.models_dir,
         )
 
-        # Prepare samples (run sync code in thread pool to avoid blocking)
-        progress_callback("Preparing samples", 0.1)
+        # Get pause event from progress callback
+        pause_event = progress_callback("Preparing samples", 0.1)
+        trainer._pause_event = pause_event
         samples = await asyncio.to_thread(
             trainer.prepare_samples,
             temp_paths,
