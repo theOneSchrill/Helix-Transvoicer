@@ -379,10 +379,24 @@ class ModelTrainer:
             pin_memory=self.device.type == "cuda",
         )
 
-        # Initialize models
-        content_encoder = ContentEncoder().to(self.device)
-        speaker_encoder = SpeakerEncoder(input_dim=self.settings.n_mels).to(self.device)
-        decoder = VoiceDecoder(n_mels=self.settings.n_mels).to(self.device)
+        # Check available GPU memory and use smaller models if needed
+        low_memory_mode = False
+        if self.device.type == "cuda":
+            total_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
+            if total_mem <= 8.5:  # 8GB or less
+                low_memory_mode = True
+                logger.info(f"Low memory mode enabled ({total_mem:.1f}GB GPU)")
+
+        # Initialize models (smaller versions for low memory GPUs)
+        if low_memory_mode:
+            # Smaller models for 8GB GPUs: hidden_dim=128, num_layers=2
+            content_encoder = ContentEncoder(hidden_dim=128, output_dim=128, num_layers=2).to(self.device)
+            speaker_encoder = SpeakerEncoder(input_dim=self.settings.n_mels, hidden_dim=128, embedding_dim=128).to(self.device)
+            decoder = VoiceDecoder(content_dim=128, speaker_dim=128, hidden_dim=256, n_mels=self.settings.n_mels, num_layers=2).to(self.device)
+        else:
+            content_encoder = ContentEncoder().to(self.device)
+            speaker_encoder = SpeakerEncoder(input_dim=self.settings.n_mels).to(self.device)
+            decoder = VoiceDecoder(n_mels=self.settings.n_mels).to(self.device)
 
         # Initialize optimizer
         params = (
@@ -408,7 +422,7 @@ class ModelTrainer:
 
         # Mixed precision training for memory efficiency (halves GPU memory usage)
         use_amp = self.device.type == "cuda"
-        scaler = torch.cuda.amp.GradScaler() if use_amp else None
+        scaler = torch.amp.GradScaler("cuda") if use_amp else None
         if use_amp:
             logger.info("Using mixed precision training (float16)")
 
@@ -444,7 +458,7 @@ class ModelTrainer:
                     optimizer.zero_grad()
 
                     # Use automatic mixed precision for forward pass
-                    with torch.cuda.amp.autocast(enabled=use_amp):
+                    with torch.amp.autocast("cuda", enabled=use_amp):
                         # Extract content features from audio
                         content_features = content_encoder(audio)  # [batch, time, 256]
 
