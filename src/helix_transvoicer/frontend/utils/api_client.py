@@ -179,26 +179,76 @@ class APIClient:
 
     # Conversion endpoints
 
+    def get_model_files(self, model_id: str) -> Dict:
+        """Get available model and index files."""
+        response = self._client.get(self._url(f"/api/convert/models/{model_id}/files"))
+        response.raise_for_status()
+        return response.json()
+
     def convert_voice(
         self,
         audio_file: Path,
         target_model_id: str,
-        pitch_shift: float = 0.0,
-        formant_shift: float = 1.0,
-        index_rate: float = 0.75,
+        # Pitch settings
+        pitch_shift: int = 0,
+        f0_method: str = "rmvpe",
+        hop_length: int = 128,
+        # Index settings
+        index_rate: float = 0.0,
+        index_file: Optional[str] = None,
+        # Audio processing
+        rms_mix_rate: float = 0.4,
+        protect: float = 0.3,
+        filter_radius: int = 3,
+        # Split & Clean
+        split_audio: bool = False,
+        autotune: bool = False,
+        clean_audio: bool = False,
+        clean_strength: float = 0.4,
+        # Formant shifting
+        formant_shifting: bool = False,
+        formant_quefrency: float = 1.0,
+        formant_timbre: float = 1.2,
+        # Post processing
+        normalize: bool = True,
+        # Model settings
+        speaker_id: int = 0,
+        embedder_model: str = "contentvec",
+        # Export
+        export_format: str = "wav",
     ) -> bytes:
-        """Convert voice and return audio bytes."""
+        """Convert voice with Applio-compatible parameters."""
+        params = {
+            "target_model_id": target_model_id,
+            "pitch_shift": pitch_shift,
+            "f0_method": f0_method,
+            "hop_length": hop_length,
+            "index_rate": index_rate,
+            "rms_mix_rate": rms_mix_rate,
+            "protect": protect,
+            "filter_radius": filter_radius,
+            "split_audio": split_audio,
+            "autotune": autotune,
+            "clean_audio": clean_audio,
+            "clean_strength": clean_strength,
+            "formant_shifting": formant_shifting,
+            "formant_quefrency": formant_quefrency,
+            "formant_timbre": formant_timbre,
+            "normalize": normalize,
+            "speaker_id": speaker_id,
+            "embedder_model": embedder_model,
+            "export_format": export_format,
+        }
+
+        if index_file:
+            params["index_file"] = index_file
+
         with open(audio_file, "rb") as f:
             response = self._client.post(
                 self._url("/api/convert/voice/download"),
                 files={"file": (audio_file.name, f, "audio/wav")},
-                params={
-                    "target_model_id": target_model_id,
-                    "pitch_shift": pitch_shift,
-                    "formant_shift": formant_shift,
-                    "index_rate": index_rate,
-                },
-                timeout=120.0,
+                params=params,
+                timeout=300.0,
             )
             response.raise_for_status()
             return response.content
@@ -207,9 +257,17 @@ class APIClient:
         self,
         audio_file: Path,
         target_model_id: str,
-        pitch_shift: float = 0.0,
+        pitch_shift: int = 0,
+        f0_method: str = "rmvpe",
+        index_rate: float = 0.0,
+        rms_mix_rate: float = 0.4,
+        protect: float = 0.3,
+        split_audio: bool = False,
+        clean_audio: bool = False,
+        formant_shifting: bool = False,
+        export_format: str = "wav",
     ) -> Dict:
-        """Start async conversion job."""
+        """Start async conversion job with Applio parameters."""
         with open(audio_file, "rb") as f:
             response = self._client.post(
                 self._url("/api/convert/voice/async"),
@@ -217,6 +275,14 @@ class APIClient:
                 params={
                     "target_model_id": target_model_id,
                     "pitch_shift": pitch_shift,
+                    "f0_method": f0_method,
+                    "index_rate": index_rate,
+                    "rms_mix_rate": rms_mix_rate,
+                    "protect": protect,
+                    "split_audio": split_audio,
+                    "clean_audio": clean_audio,
+                    "formant_shifting": formant_shifting,
+                    "export_format": export_format,
                 },
             )
             response.raise_for_status()

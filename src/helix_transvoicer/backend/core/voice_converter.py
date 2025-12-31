@@ -32,18 +32,44 @@ except ImportError:
 
 @dataclass
 class ConversionConfig:
-    """Voice conversion configuration."""
+    """Voice conversion configuration - Applio-compatible parameters."""
 
-    # General settings
-    pitch_shift: float = 0.0  # semitones (-12 to +12)
-    normalize_output: bool = True
-    formant_shift: float = 1.0  # Not used in RVC but kept for API compatibility
+    # === Pitch Settings ===
+    pitch_shift: int = 0  # semitones (-24 to +24)
+    f0_method: str = "rmvpe"  # Pitch extraction: crepe, crepe-tiny, rmvpe, fcpe
+    hop_length: int = 128  # Hop length for pitch extraction (64-512)
 
-    # RVC-specific
-    index_rate: float = 0.75  # Feature retrieval blend (0-1)
-    filter_radius: int = 3  # Pitch median filter
-    rms_mix_rate: float = 0.25  # Volume envelope mixing
-    protect: float = 0.33  # Protect voiceless consonants
+    # === Index/Feature Settings ===
+    index_rate: float = 0.0  # Search Feature Ratio (0-1), higher = more index influence
+    index_file: Optional[str] = None  # Specific index file to use (auto-detect if None)
+
+    # === Audio Processing ===
+    rms_mix_rate: float = 0.4  # Volume Envelope (0-1), 0=input loudness, 1=training set
+    protect: float = 0.3  # Protect Voiceless Consonants (0-0.5), 0.5=disabled
+    filter_radius: int = 3  # Median filter radius for pitch (0-7)
+
+    # === Split & Clean ===
+    split_audio: bool = False  # Split audio into chunks for better results
+    autotune: bool = False  # Apply soft autotune (for singing)
+    clean_audio: bool = False  # Clean audio with noise detection
+    clean_strength: float = 0.4  # Cleaning strength (0-1)
+
+    # === Formant Shifting ===
+    formant_shifting: bool = False  # Enable formant shift (male<->female)
+    formant_preset: str = "m2f"  # Preset: m2f, f2m, etc.
+    formant_quefrency: float = 1.0  # Quefrency (0-16)
+    formant_timbre: float = 1.2  # Timbre (0-16)
+
+    # === Post Processing ===
+    post_process: bool = False  # Apply post-processing effects
+    normalize_output: bool = True  # Normalize output audio
+
+    # === Model Settings ===
+    speaker_id: int = 0  # Speaker ID for multi-speaker models
+    embedder_model: str = "contentvec"  # contentvec, spin, spin-v2, hubert variants
+
+    # === Export Settings ===
+    export_format: str = "wav"  # Output format: wav, mp3, flac, ogg, m4a
 
 
 @dataclass
@@ -205,6 +231,11 @@ class VoiceConverter:
             },
         )
 
+    def _get_rvc_index_files(self, model_id: str) -> list[Path]:
+        """Get all index files for a model."""
+        model_dir = self.models_dir / model_id
+        return list(model_dir.glob("*.index"))
+
     def _convert_with_rvc(
         self,
         audio: np.ndarray,
@@ -213,7 +244,7 @@ class VoiceConverter:
         cfg: ConversionConfig,
         update_progress: Callable[[str, float], None],
     ) -> tuple[np.ndarray, int]:
-        """Convert using RVC."""
+        """Convert using RVC with Applio-compatible parameters."""
         rvc = self._get_rvc_inference()
 
         if rvc is None:
@@ -223,7 +254,14 @@ class VoiceConverter:
 
         # Load model
         model_path = self._get_rvc_model_path(model_id)
-        index_path = self._get_rvc_index_path(model_id)
+
+        # Get index path - use specific file if provided, otherwise auto-detect
+        if cfg.index_file:
+            index_path = self.models_dir / model_id / cfg.index_file
+            if not index_path.exists():
+                index_path = self._get_rvc_index_path(model_id)
+        else:
+            index_path = self._get_rvc_index_path(model_id)
 
         if not rvc.load_rvc_model(model_path):
             raise RuntimeError(f"Failed to load RVC model: {model_path}")
@@ -239,6 +277,17 @@ class VoiceConverter:
             filter_radius=cfg.filter_radius,
             rms_mix_rate=cfg.rms_mix_rate,
             protect=cfg.protect,
+            f0_method=cfg.f0_method,
+            hop_length=cfg.hop_length,
+            split_audio=cfg.split_audio,
+            clean_audio=cfg.clean_audio,
+            clean_strength=cfg.clean_strength,
+            autotune=cfg.autotune,
+            formant_shifting=cfg.formant_shifting,
+            formant_quefrency=cfg.formant_quefrency,
+            formant_timbre=cfg.formant_timbre,
+            embedder_model=cfg.embedder_model,
+            speaker_id=cfg.speaker_id,
             progress_callback=lambda msg, prog: update_progress(msg, 0.4 + prog * 0.4),
         )
 
