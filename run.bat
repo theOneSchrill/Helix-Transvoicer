@@ -23,6 +23,21 @@ if not exist "venv\Scripts\activate.bat" (
 :: Activate virtual environment
 call venv\Scripts\activate.bat
 
+:: Check dependencies
+echo.
+echo  Checking dependencies...
+python scripts\check_dependencies.py
+if errorlevel 1 (
+    echo.
+    echo  [!] Dependency check failed. Continue anyway? [y/N]
+    set /p CONTINUE=
+    if /i not "%CONTINUE%"=="y" (
+        if /i not "%CONTINUE%"=="yes" (
+            exit /b 1
+        )
+    )
+)
+
 :: Start the application
 echo.
 echo  Starting Helix Transvoicer...
