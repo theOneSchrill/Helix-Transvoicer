@@ -28,6 +28,7 @@ class ModelInfo(BaseModel):
     total_duration: float
     quality_score: float
     is_loaded: bool
+    model_type: str = "helix"  # "helix" or "rvc"
     emotion_coverage: Dict
 
 
@@ -74,6 +75,7 @@ async def list_models(request: Request):
             total_duration=m.total_duration,
             quality_score=m.quality_score,
             is_loaded=m.is_loaded,
+            model_type=m.model_type,
             emotion_coverage=m.emotion_coverage,
         )
         for m in models
@@ -99,6 +101,7 @@ async def get_model(request: Request, model_id: str):
         total_duration=model.total_duration,
         quality_score=model.quality_score,
         is_loaded=model.is_loaded,
+        model_type=model.model_type,
         emotion_coverage=model.emotion_coverage,
     )
 
@@ -124,6 +127,7 @@ async def create_model(request: Request, body: ModelCreateRequest):
             total_duration=model.total_duration,
             quality_score=model.quality_score,
             is_loaded=model.is_loaded,
+            model_type=model.model_type,
             emotion_coverage=model.emotion_coverage,
         )
 

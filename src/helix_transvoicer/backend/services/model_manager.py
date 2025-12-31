@@ -35,6 +35,7 @@ class VoiceModel:
     emotion_coverage: Dict
     quality_score: float
     is_loaded: bool = False
+    model_type: str = "helix"  # "helix" or "rvc"
     metadata: Dict = field(default_factory=dict)
 
 
@@ -74,18 +75,30 @@ class ModelManager:
         if not self.models_dir.exists():
             return
 
-        required_files = ["metadata.json", "speaker_encoder.pt", "decoder.pt", "content_encoder.pt"]
+        # Files required for Helix native models
+        helix_required_files = ["metadata.json", "speaker_encoder.pt", "decoder.pt", "content_encoder.pt"]
 
         for model_dir in self.models_dir.iterdir():
             if not model_dir.is_dir():
                 continue
 
-            # Check if all required files exist
-            missing_files = [f for f in required_files if not (model_dir / f).exists()]
+            # Skip RVC models (have .pth files)
+            pth_files = list(model_dir.glob("*.pth"))
+            if pth_files:
+                logger.debug(f"Skipping RVC model: {model_dir.name}")
+                continue
 
-            if missing_files:
+            # Skip if has metadata.json (could be partial but valid)
+            if (model_dir / "metadata.json").exists():
+                continue
+
+            # Check if it's an incomplete Helix model (has some but not all files)
+            has_any_helix_file = any((model_dir / f).exists() for f in helix_required_files[1:])
+
+            if has_any_helix_file:
+                missing_files = [f for f in helix_required_files if not (model_dir / f).exists()]
                 logger.warning(
-                    f"Found incomplete model '{model_dir.name}' (missing: {', '.join(missing_files)}). "
+                    f"Found incomplete Helix model '{model_dir.name}' (missing: {', '.join(missing_files)}). "
                     f"Removing..."
                 )
                 try:
@@ -116,11 +129,39 @@ class ModelManager:
         """Load model metadata from directory."""
         metadata_path = model_dir / "metadata.json"
 
-        if not metadata_path.exists():
-            return None
+        # Check for RVC model (.pth files)
+        pth_files = list(model_dir.glob("*.pth"))
+        index_files = list(model_dir.glob("*.index"))
+        is_rvc_model = len(pth_files) > 0
 
-        with open(metadata_path) as f:
-            data = json.load(f)
+        if metadata_path.exists():
+            with open(metadata_path) as f:
+                data = json.load(f)
+        elif is_rvc_model:
+            # Auto-generate metadata for RVC models
+            now = datetime.now()
+            pth_file = pth_files[0]
+            data = {
+                "model_id": model_dir.name,
+                "version": "1.0.0",
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+                "total_samples": 0,
+                "total_duration": 0.0,
+                "emotion_coverage": {},
+                "model_type": "rvc",
+                "rvc_model_file": pth_file.name,
+                "rvc_index_file": index_files[0].name if index_files else None,
+            }
+            # Save the auto-generated metadata
+            try:
+                with open(metadata_path, "w") as f:
+                    json.dump(data, f, indent=2)
+                logger.info(f"Created metadata for RVC model: {model_dir.name}")
+            except Exception as e:
+                logger.warning(f"Could not save metadata for {model_dir.name}: {e}")
+        else:
+            return None
 
         return VoiceModel(
             id=data.get("model_id", model_dir.name),
@@ -137,6 +178,7 @@ class ModelManager:
             total_duration=data.get("total_duration", 0.0),
             emotion_coverage=data.get("emotion_coverage", {}),
             quality_score=data.get("quality_metrics", {}).get("overall_quality", 0.0),
+            model_type=data.get("model_type", "rvc" if is_rvc_model else "helix"),
             metadata=data,
         )
 

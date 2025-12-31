@@ -39,10 +39,13 @@ class ModelCard(ctk.CTkFrame):
         """Build model card UI."""
         self.grid_columnconfigure(1, weight=1)
 
-        # Icon
+        # Icon - different for RVC vs Helix models
+        is_rvc = self.model_data.get("model_type") == "rvc"
+        icon_text = "🎤" if is_rvc else "🔊"
+
         icon = ctk.CTkLabel(
             self,
-            text="🔊",
+            text=icon_text,
             font=("", 24),
         )
         icon.grid(row=0, column=0, rowspan=2, padx=15, pady=15)
@@ -59,9 +62,14 @@ class ModelCard(ctk.CTkFrame):
         )
         name.pack(anchor="w")
 
+        # Show model type badge for RVC models
+        version_text = f"v{self.model_data.get('version', '1.0.0')}"
+        if is_rvc:
+            version_text = f"RVC · {version_text}"
+
         version = ctk.CTkLabel(
             info_frame,
-            text=f"v{self.model_data.get('version', '1.0.0')}",
+            text=version_text,
             font=HelixTheme.FONTS["small"],
             text_color=HelixTheme.COLORS["accent"],
         )
