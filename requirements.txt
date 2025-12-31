@@ -10,9 +10,9 @@ soundfile>=0.12.0
 pydub>=0.25.0
 noisereduce>=2.0.0
 
-# RVC Voice Conversion
-rvc-python>=0.2.0
-faiss-cpu>=1.7.0
+# RVC Voice Conversion (optional - install separately if needed)
+# For full RVC support, install from: https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI
+praat-parselmouth>=0.4.3
 
 # API framework
 fastapi>=0.100.0
