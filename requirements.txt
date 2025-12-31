@@ -13,6 +13,7 @@ noisereduce>=2.0.0
 # RVC Voice Conversion (optional - install separately if needed)
 # For full RVC support, install from: https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI
 praat-parselmouth>=0.4.3
+faiss-cpu>=1.7.0
 
 # API framework
 fastapi>=0.100.0

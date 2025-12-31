@@ -1,21 +1,20 @@
 """
 Helix Transvoicer - Voice conversion pipeline.
 
-Uses Praat/Parselmouth for professional-grade voice manipulation including
-pitch shifting, formant modification, and voice characteristic transfer.
+Supports multiple conversion methods:
+1. RVC (Retrieval-based Voice Conversion) - Best quality
+2. Praat/Parselmouth - Fallback for pitch/formant manipulation
 """
 
 import json
 import logging
-import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, Dict, Optional, Union
 
 import librosa
 import numpy as np
-import soundfile as sf
 
 from helix_transvoicer.backend.core.audio_processor import AudioProcessor
 from helix_transvoicer.backend.utils.audio import AudioUtils
@@ -23,27 +22,43 @@ from helix_transvoicer.backend.utils.config import get_settings
 
 logger = logging.getLogger("helix.voice_converter")
 
-# Try to import Parselmouth for professional voice manipulation
+# Try to import Parselmouth
 try:
     import parselmouth
     from parselmouth.praat import call
     PARSELMOUTH_AVAILABLE = True
-    logger.info("Parselmouth (Praat) available for voice conversion")
 except ImportError:
     PARSELMOUTH_AVAILABLE = False
     logger.warning("Parselmouth not available - install with: pip install praat-parselmouth")
+
+# Try to import RVC
+try:
+    from helix_transvoicer.backend.rvc.inference import RVCInference
+    from helix_transvoicer.backend.rvc.models import RVCModelManager, check_rvc_ready
+    RVC_AVAILABLE = True
+except ImportError:
+    RVC_AVAILABLE = False
+    logger.warning("RVC module not available")
 
 
 @dataclass
 class ConversionConfig:
     """Voice conversion configuration."""
 
+    # General settings
     pitch_shift: float = 0.0  # semitones (-12 to +12)
-    formant_shift: float = 1.0  # ratio (0.8 = deeper, 1.2 = higher)
-    pitch_range: float = 1.0  # pitch variation (0.5 = monotone, 1.5 = expressive)
-    duration_factor: float = 1.0  # speed (0.8 = faster, 1.2 = slower)
-    intensity_factor: float = 1.0  # volume adjustment
     normalize_output: bool = True
+
+    # Parselmouth-specific
+    formant_shift: float = 1.0  # ratio (0.8 = deeper, 1.2 = higher)
+    pitch_range: float = 1.0  # pitch variation
+    duration_factor: float = 1.0  # speed
+
+    # RVC-specific
+    index_rate: float = 0.75  # Feature retrieval blend (0-1)
+    filter_radius: int = 3  # Pitch median filter
+    rms_mix_rate: float = 0.25  # Volume envelope mixing
+    protect: float = 0.33  # Protect voiceless consonants
 
 
 @dataclass
@@ -63,35 +78,80 @@ class ConversionResult:
 @dataclass
 class VoiceProfile:
     """Voice characteristics profile."""
-    pitch_median: float = 150.0  # Hz
+    pitch_median: float = 150.0
     pitch_min: float = 75.0
     pitch_max: float = 300.0
-    formant_shift: float = 1.0  # 1.0 = neutral
-    intensity: float = 70.0  # dB
+    formant_shift: float = 1.0
 
 
 class VoiceConverter:
     """
-    Voice conversion engine using Praat/Parselmouth.
+    Voice conversion engine.
 
-    Uses professional-grade PSOLA algorithm for:
-    - Pitch manipulation (shift and range)
-    - Formant shifting (voice character)
-    - Duration modification
-    - Voice profile matching
+    Uses RVC (Retrieval-based Voice Conversion) when available,
+    falls back to Praat/Parselmouth for simpler transformations.
     """
 
     def __init__(
         self,
-        device=None,  # Kept for API compatibility
+        device=None,
         models_dir: Optional[Path] = None,
     ):
         self.settings = get_settings()
         self.models_dir = models_dir or self.settings.models_dir
         self.audio_processor = AudioProcessor()
+        self.device = device
 
-        # Cache for voice profiles
+        # RVC inference engine (lazy loaded)
+        self._rvc_inference: Optional[RVCInference] = None
+
+        # Cache
         self._profile_cache: Dict[str, VoiceProfile] = {}
+
+    def _get_rvc_inference(self) -> Optional[RVCInference]:
+        """Get or create RVC inference engine."""
+        if not RVC_AVAILABLE:
+            return None
+
+        if self._rvc_inference is None:
+            try:
+                self._rvc_inference = RVCInference(device=self.device)
+            except Exception as e:
+                logger.warning(f"Failed to initialize RVC: {e}")
+                return None
+
+        return self._rvc_inference
+
+    def _has_rvc_model(self, model_id: str) -> bool:
+        """Check if model has RVC files (.pth)."""
+        model_dir = self.models_dir / model_id
+
+        if not model_dir.exists():
+            return False
+
+        # Check for .pth files
+        pth_files = list(model_dir.glob("*.pth"))
+        return len(pth_files) > 0
+
+    def _get_rvc_model_path(self, model_id: str) -> Optional[Path]:
+        """Get path to RVC model file."""
+        model_dir = self.models_dir / model_id
+
+        pth_files = list(model_dir.glob("*.pth"))
+        if pth_files:
+            return pth_files[0]
+
+        return None
+
+    def _get_rvc_index_path(self, model_id: str) -> Optional[Path]:
+        """Get path to RVC index file."""
+        model_dir = self.models_dir / model_id
+
+        index_files = list(model_dir.glob("*.index"))
+        if index_files:
+            return index_files[0]
+
+        return None
 
     def convert(
         self,
@@ -103,14 +163,7 @@ class VoiceConverter:
         """
         Convert source audio to target voice.
 
-        Args:
-            source_audio: Path to audio file or audio array
-            target_model_id: ID of target voice model
-            config: Conversion configuration
-            progress_callback: Optional callback for progress updates
-
-        Returns:
-            ConversionResult with converted audio
+        Uses RVC if model has .pth file, otherwise uses Parselmouth.
         """
         start_time = time.time()
         cfg = config or ConversionConfig()
@@ -130,30 +183,25 @@ class VoiceConverter:
             sr = self.settings.sample_rate
             source_duration = len(audio) / sr
 
-        update_progress("Loading voice profile", 0.2)
+        update_progress("Checking model", 0.1)
 
-        # Load target voice profile
-        target_profile = self._load_voice_profile(target_model_id)
+        # Determine conversion method
+        use_rvc = self._has_rvc_model(target_model_id) and RVC_AVAILABLE
 
-        # Analyze source voice
-        source_profile = self._analyze_voice(audio, sr)
-
-        update_progress("Converting voice", 0.3)
-
-        # Convert using Parselmouth if available
-        if PARSELMOUTH_AVAILABLE:
-            audio_output = self._convert_with_parselmouth(
-                audio, sr, source_profile, target_profile, cfg, update_progress
+        if use_rvc:
+            logger.info(f"Using RVC for {target_model_id}")
+            audio_output, sr_out, method = self._convert_with_rvc(
+                audio, sr, target_model_id, cfg, update_progress
             )
         else:
-            # Fallback to librosa
-            audio_output = self._convert_with_librosa(
-                audio, sr, source_profile, target_profile, cfg, update_progress
+            logger.info(f"Using Parselmouth for {target_model_id}")
+            audio_output, sr_out, method = self._convert_with_parselmouth(
+                audio, sr, target_model_id, cfg, update_progress
             )
 
         update_progress("Post-processing", 0.9)
 
-        # Normalize output
+        # Normalize
         if cfg.normalize_output:
             audio_output = AudioUtils.normalize(audio_output)
 
@@ -163,146 +211,163 @@ class VoiceConverter:
 
         return ConversionResult(
             audio=audio_output,
-            sample_rate=sr,
-            duration=len(audio_output) / sr,
+            sample_rate=sr_out,
+            duration=len(audio_output) / sr_out,
             source_duration=source_duration,
             model_id=target_model_id,
             config=cfg,
             processing_time=processing_time,
             metadata={
-                "method": "parselmouth" if PARSELMOUTH_AVAILABLE else "librosa",
-                "source_pitch": source_profile.pitch_median,
-                "target_pitch": target_profile.pitch_median,
+                "method": method,
+                "rvc_available": RVC_AVAILABLE,
+                "parselmouth_available": PARSELMOUTH_AVAILABLE,
             },
         )
+
+    def _convert_with_rvc(
+        self,
+        audio: np.ndarray,
+        sr: int,
+        model_id: str,
+        cfg: ConversionConfig,
+        update_progress: Callable[[str, float], None],
+    ) -> tuple[np.ndarray, int, str]:
+        """Convert using RVC."""
+        rvc = self._get_rvc_inference()
+
+        if rvc is None:
+            logger.warning("RVC not available, falling back to Parselmouth")
+            return self._convert_with_parselmouth(audio, sr, model_id, cfg, update_progress)
+
+        update_progress("Loading RVC model", 0.2)
+
+        # Load model
+        model_path = self._get_rvc_model_path(model_id)
+        index_path = self._get_rvc_index_path(model_id)
+
+        if not rvc.load_rvc_model(model_path):
+            logger.warning("Failed to load RVC model, falling back to Parselmouth")
+            return self._convert_with_parselmouth(audio, sr, model_id, cfg, update_progress)
+
+        update_progress("Converting with RVC", 0.4)
+
+        try:
+            audio_out, sr_out = rvc.convert(
+                audio,
+                sr,
+                f0_up_key=int(cfg.pitch_shift),
+                index_path=index_path,
+                index_rate=cfg.index_rate,
+                filter_radius=cfg.filter_radius,
+                rms_mix_rate=cfg.rms_mix_rate,
+                protect=cfg.protect,
+                progress_callback=lambda msg, prog: update_progress(msg, 0.4 + prog * 0.4),
+            )
+
+            return audio_out, sr_out, "rvc"
+
+        except Exception as e:
+            logger.error(f"RVC conversion failed: {e}")
+            logger.info("Falling back to Parselmouth")
+            return self._convert_with_parselmouth(audio, sr, model_id, cfg, update_progress)
 
     def _convert_with_parselmouth(
         self,
         audio: np.ndarray,
         sr: int,
-        source_profile: VoiceProfile,
-        target_profile: VoiceProfile,
+        model_id: str,
         cfg: ConversionConfig,
         update_progress: Callable[[str, float], None],
-    ) -> np.ndarray:
-        """Convert audio using Praat/Parselmouth PSOLA algorithm."""
+    ) -> tuple[np.ndarray, int, str]:
+        """Convert using Parselmouth."""
+        update_progress("Loading voice profile", 0.2)
 
-        # Create Parselmouth Sound object
+        # Load target voice profile
+        target_profile = self._load_voice_profile(model_id)
+        source_profile = self._analyze_voice(audio, sr)
+
+        update_progress("Converting voice", 0.4)
+
+        if PARSELMOUTH_AVAILABLE:
+            audio_out = self._parselmouth_convert(
+                audio, sr, source_profile, target_profile, cfg
+            )
+        else:
+            audio_out = self._librosa_convert(
+                audio, sr, source_profile, target_profile, cfg
+            )
+
+        return audio_out, sr, "parselmouth" if PARSELMOUTH_AVAILABLE else "librosa"
+
+    def _parselmouth_convert(
+        self,
+        audio: np.ndarray,
+        sr: int,
+        source: VoiceProfile,
+        target: VoiceProfile,
+        cfg: ConversionConfig,
+    ) -> np.ndarray:
+        """Convert using Parselmouth PSOLA."""
         sound = parselmouth.Sound(audio, sampling_frequency=sr)
 
-        update_progress("Analyzing pitch", 0.4)
-
-        # Calculate pitch shift ratio
-        if source_profile.pitch_median > 0 and target_profile.pitch_median > 0:
-            pitch_ratio = target_profile.pitch_median / source_profile.pitch_median
+        # Calculate pitch ratio
+        if source.pitch_median > 0 and target.pitch_median > 0:
+            pitch_ratio = target.pitch_median / source.pitch_median
         else:
             pitch_ratio = 1.0
 
-        # Apply user pitch shift (in semitones)
+        # Apply user pitch shift
         if cfg.pitch_shift != 0:
             pitch_ratio *= 2 ** (cfg.pitch_shift / 12.0)
 
-        # Calculate formant shift
-        formant_ratio = target_profile.formant_shift * cfg.formant_shift
+        # Formant ratio
+        formant_ratio = target.formant_shift * cfg.formant_shift
 
-        update_progress("Manipulating voice", 0.5)
-
-        # Use Praat's "Change gender" function for voice conversion
-        # This handles pitch AND formants together using PSOLA
         try:
             converted = call(
                 sound,
                 "Change gender",
-                75,  # pitch floor (Hz)
-                600,  # pitch ceiling (Hz)
-                formant_ratio,  # formant shift ratio
-                pitch_ratio,  # new pitch median (as ratio)
-                cfg.pitch_range,  # pitch range factor
-                cfg.duration_factor,  # duration factor
+                75, 600,  # pitch floor, ceiling
+                formant_ratio,
+                pitch_ratio,
+                cfg.pitch_range,
+                cfg.duration_factor,
             )
 
-            update_progress("Extracting audio", 0.8)
-
-            # Extract audio array
-            audio_output = converted.values.flatten()
-
-            return audio_output
+            return converted.values.flatten()
 
         except Exception as e:
-            logger.warning(f"Parselmouth conversion failed: {e}, using fallback")
-            return self._convert_with_librosa(
-                audio, sr, source_profile, target_profile, cfg, update_progress
-            )
+            logger.warning(f"Parselmouth failed: {e}")
+            return audio
 
-    def _convert_with_librosa(
+    def _librosa_convert(
         self,
         audio: np.ndarray,
         sr: int,
-        source_profile: VoiceProfile,
-        target_profile: VoiceProfile,
+        source: VoiceProfile,
+        target: VoiceProfile,
         cfg: ConversionConfig,
-        update_progress: Callable[[str, float], None],
     ) -> np.ndarray:
-        """Fallback conversion using librosa."""
-
-        update_progress("Calculating pitch shift", 0.4)
-
-        # Calculate pitch shift in semitones
-        if source_profile.pitch_median > 0 and target_profile.pitch_median > 0:
-            pitch_ratio = target_profile.pitch_median / source_profile.pitch_median
+        """Fallback using librosa pitch shift."""
+        if source.pitch_median > 0 and target.pitch_median > 0:
+            pitch_ratio = target.pitch_median / source.pitch_median
             auto_shift = 12 * np.log2(pitch_ratio)
         else:
             auto_shift = 0.0
 
         total_shift = auto_shift + cfg.pitch_shift
 
-        update_progress("Shifting pitch", 0.5)
-
-        # Apply pitch shift
         if abs(total_shift) > 0.1:
-            audio_output = librosa.effects.pitch_shift(
-                audio, sr=sr, n_steps=total_shift
-            )
-        else:
-            audio_output = audio.copy()
+            return librosa.effects.pitch_shift(audio, sr=sr, n_steps=total_shift)
 
-        # Apply formant shift via time stretch + pitch compensation
-        if abs(cfg.formant_shift - 1.0) > 0.05:
-            update_progress("Shifting formants", 0.7)
-            audio_output = self._apply_formant_shift_librosa(
-                audio_output, sr, cfg.formant_shift
-            )
-
-        return audio_output
-
-    def _apply_formant_shift_librosa(
-        self,
-        audio: np.ndarray,
-        sr: int,
-        shift: float,
-    ) -> np.ndarray:
-        """Apply formant shift using librosa time stretch + pitch."""
-        try:
-            # Time stretch
-            stretched = librosa.effects.time_stretch(audio, rate=shift)
-
-            # Pitch shift to compensate
-            compensate = -12 * np.log2(shift)
-            result = librosa.effects.pitch_shift(stretched, sr=sr, n_steps=compensate)
-
-            return result
-        except Exception as e:
-            logger.warning(f"Formant shift failed: {e}")
-            return audio
+        return audio.copy()
 
     def _analyze_voice(self, audio: np.ndarray, sr: int) -> VoiceProfile:
-        """Analyze voice characteristics of audio."""
-
+        """Analyze voice characteristics."""
         if PARSELMOUTH_AVAILABLE:
             try:
                 sound = parselmouth.Sound(audio, sampling_frequency=sr)
                 pitch = call(sound, "To Pitch", 0.0, 75, 600)
-
                 pitch_values = pitch.selected_array['frequency']
                 pitch_values = pitch_values[pitch_values > 0]
 
@@ -313,38 +378,37 @@ class VoiceConverter:
                         pitch_max=float(np.max(pitch_values)),
                     )
             except Exception as e:
-                logger.warning(f"Parselmouth pitch analysis failed: {e}")
+                logger.warning(f"Parselmouth analysis failed: {e}")
 
         # Fallback to librosa
         try:
-            f0, voiced_flag, _ = librosa.pyin(
+            f0, voiced, _ = librosa.pyin(
                 audio,
                 fmin=librosa.note_to_hz('C2'),
                 fmax=librosa.note_to_hz('C6'),
                 sr=sr,
             )
-            if voiced_flag is not None:
-                voiced_f0 = f0[voiced_flag]
+            if voiced is not None:
+                voiced_f0 = f0[voiced]
                 if len(voiced_f0) > 0:
                     return VoiceProfile(
                         pitch_median=float(np.median(voiced_f0)),
                         pitch_min=float(np.nanmin(voiced_f0)),
                         pitch_max=float(np.nanmax(voiced_f0)),
                     )
-        except Exception as e:
-            logger.warning(f"Librosa pitch analysis failed: {e}")
+        except Exception:
+            pass
 
         return VoiceProfile()
 
     def _load_voice_profile(self, model_id: str) -> VoiceProfile:
-        """Load voice profile for a model."""
-
+        """Load voice profile from model."""
         if model_id in self._profile_cache:
             return self._profile_cache[model_id]
 
         model_path = self.models_dir / model_id
 
-        # Try to load from voice_characteristics.json
+        # Try voice_characteristics.json
         char_path = model_path / "voice_characteristics.json"
         if char_path.exists():
             try:
@@ -358,10 +422,10 @@ class VoiceConverter:
                     )
                     self._profile_cache[model_id] = profile
                     return profile
-            except Exception as e:
-                logger.warning(f"Failed to load voice profile: {e}")
+            except Exception:
+                pass
 
-        # Try to analyze from samples
+        # Analyze from samples
         samples_dir = model_path / "samples"
         if samples_dir.exists():
             profile = self._analyze_samples(samples_dir)
@@ -370,24 +434,21 @@ class VoiceConverter:
                 self._profile_cache[model_id] = profile
                 return profile
 
-        # Return default
-        logger.warning(f"No voice profile for {model_id}, using defaults")
         return VoiceProfile()
 
     def _analyze_samples(self, samples_dir: Path) -> Optional[VoiceProfile]:
-        """Analyze training samples to build voice profile."""
-
+        """Analyze training samples."""
         sample_files = list(samples_dir.glob("*.wav")) + list(samples_dir.glob("*.mp3"))
         all_pitches = []
 
-        for sample_file in sample_files[:10]:
+        for sample in sample_files[:10]:
             try:
-                audio, sr = librosa.load(str(sample_file), sr=22050)
+                audio, sr = librosa.load(str(sample), sr=22050)
                 profile = self._analyze_voice(audio, sr)
                 if profile.pitch_median > 0:
                     all_pitches.append(profile.pitch_median)
-            except Exception as e:
-                logger.debug(f"Failed to analyze {sample_file}: {e}")
+            except Exception:
+                pass
 
         if all_pitches:
             return VoiceProfile(
@@ -399,26 +460,33 @@ class VoiceConverter:
         return None
 
     def _save_voice_profile(self, model_path: Path, profile: VoiceProfile):
-        """Save voice profile to file."""
+        """Save voice profile."""
         char_path = model_path / "voice_characteristics.json"
         try:
-            data = {
-                "pitch_median": profile.pitch_median,
-                "pitch_mean": profile.pitch_median,  # Alias for compatibility
-                "pitch_min": profile.pitch_min,
-                "pitch_max": profile.pitch_max,
-                "formant_shift": profile.formant_shift,
-            }
             with open(char_path, "w") as f:
-                json.dump(data, f, indent=2)
-            logger.info(f"Saved voice profile to {char_path}")
+                json.dump({
+                    "pitch_median": profile.pitch_median,
+                    "pitch_mean": profile.pitch_median,
+                    "pitch_min": profile.pitch_min,
+                    "pitch_max": profile.pitch_max,
+                    "formant_shift": profile.formant_shift,
+                }, f, indent=2)
         except Exception as e:
             logger.warning(f"Failed to save voice profile: {e}")
 
+    def is_rvc_available(self) -> bool:
+        """Check if RVC is available."""
+        return RVC_AVAILABLE
+
+    def has_rvc_model(self, model_id: str) -> bool:
+        """Check if model has RVC files."""
+        return self._has_rvc_model(model_id)
+
     def clear_cache(self):
-        """Clear voice profile cache."""
+        """Clear caches."""
         self._profile_cache.clear()
 
     def set_device(self, device):
-        """Set device (no-op, kept for API compatibility)."""
-        pass
+        """Set device."""
+        self.device = device
+        self._rvc_inference = None  # Force re-init
