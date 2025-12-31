@@ -181,24 +181,64 @@ class RVCInference:
                 config = default_config.copy()
                 config.update(raw_config)
                 logger.info(f"Using dict config, sr={config.get('sr')}")
-            elif isinstance(raw_config, (list, tuple)):
-                # RVC models store config as list - format varies by version
+            elif isinstance(raw_config, (list, tuple)) and len(raw_config) >= 17:
+                # RVC v2 config list format (18 elements with segment_size):
+                # [spec_channels, segment_size, inter_channels, hidden_channels, filter_channels,
+                #  n_heads, n_layers, kernel_size, p_dropout, resblock, resblock_kernel_sizes,
+                #  resblock_dilation_sizes, upsample_rates, upsample_initial_channel,
+                #  upsample_kernel_sizes, spk_embed_dim, gin_channels, sr]
                 logger.info(f"Config is a list with {len(raw_config)} elements: {raw_config}")
-                config = default_config.copy()
 
-                # Try to detect sample rate from list (usually first or last element)
-                for val in raw_config:
-                    if isinstance(val, int) and val in [32000, 40000, 48000]:
-                        config["sr"] = val
-                        logger.info(f"Detected sample rate: {val}")
-                        break
+                if len(raw_config) == 18:
+                    # Format with segment_size at position 1
+                    config = {
+                        "spec_channels": raw_config[0],
+                        "inter_channels": raw_config[2],
+                        "hidden_channels": raw_config[3],
+                        "filter_channels": raw_config[4],
+                        "n_heads": raw_config[5],
+                        "n_layers": raw_config[6],
+                        "kernel_size": raw_config[7],
+                        "p_dropout": raw_config[8],
+                        "resblock": raw_config[9],
+                        "resblock_kernel_sizes": raw_config[10],
+                        "resblock_dilation_sizes": raw_config[11],
+                        "upsample_rates": raw_config[12],
+                        "upsample_initial_channel": raw_config[13],
+                        "upsample_kernel_sizes": raw_config[14],
+                        "spk_embed_dim": raw_config[15],
+                        "gin_channels": raw_config[16],
+                        "sr": raw_config[17],
+                    }
+                elif len(raw_config) == 17:
+                    # Format without segment_size
+                    config = {
+                        "spec_channels": raw_config[0],
+                        "inter_channels": raw_config[1],
+                        "hidden_channels": raw_config[2],
+                        "filter_channels": raw_config[3],
+                        "n_heads": raw_config[4],
+                        "n_layers": raw_config[5],
+                        "kernel_size": raw_config[6],
+                        "p_dropout": raw_config[7],
+                        "resblock": raw_config[8],
+                        "resblock_kernel_sizes": raw_config[9],
+                        "resblock_dilation_sizes": raw_config[10],
+                        "upsample_rates": raw_config[11],
+                        "upsample_initial_channel": raw_config[12],
+                        "upsample_kernel_sizes": raw_config[13],
+                        "spk_embed_dim": raw_config[14],
+                        "gin_channels": raw_config[15],
+                        "sr": raw_config[16],
+                    }
+                else:
+                    config = default_config
 
-                # Don't try to map list - too many format variations
-                # Just use defaults which work for most v2 models
-                logger.info("Using default v2 config with detected sample rate")
+                logger.info(f"Parsed config: inter_channels={config['inter_channels']}, "
+                           f"hidden_channels={config['hidden_channels']}, sr={config['sr']}")
             else:
                 config = default_config
-                logger.info(f"Unknown config type {type(raw_config)}, using defaults")
+                logger.info(f"Unknown config format, using defaults")
 
             # Build and load synthesizer
             from helix_transvoicer.backend.rvc.synthesizer import SynthesizerTrnMs768NSFsid
