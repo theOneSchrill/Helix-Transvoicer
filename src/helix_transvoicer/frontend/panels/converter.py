@@ -247,17 +247,29 @@ class ConverterPanel(ctk.CTkFrame):
         )
         self.pitch_slider.pack(fill="x", pady=5)
 
-        # Smoothing slider
-        self.smoothing_slider = Slider(
+        # Formant shift slider
+        self.formant_slider = Slider(
             section,
-            label="Smoothing:",
-            from_=0.0,
-            to=1.0,
-            default=0.5,
-            format_str="{:.2f}",
+            label="Formant Shift:",
+            from_=0.5,
+            to=2.0,
+            default=1.0,
+            format_str="{:.2f}x",
             width=260,
         )
-        self.smoothing_slider.pack(fill="x", pady=5)
+        self.formant_slider.pack(fill="x", pady=5)
+
+        # RVC Index Rate slider
+        self.index_rate_slider = Slider(
+            section,
+            label="Voice Similarity (RVC):",
+            from_=0.0,
+            to=1.0,
+            default=0.75,
+            format_str="{:.0%}",
+            width=260,
+        )
+        self.index_rate_slider.pack(fill="x", pady=5)
 
         # Options
         options_frame = ctk.CTkFrame(section, fg_color="transparent")
@@ -316,7 +328,8 @@ class ConverterPanel(ctk.CTkFrame):
                 self._source_path,
                 model_id,
                 pitch_shift=self.pitch_slider.get(),
-                smoothing=self.smoothing_slider.get(),
+                formant_shift=self.formant_slider.get(),
+                index_rate=self.index_rate_slider.get(),
             )
 
             self.progress.set_complete()

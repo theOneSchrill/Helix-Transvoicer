@@ -184,7 +184,8 @@ class APIClient:
         audio_file: Path,
         target_model_id: str,
         pitch_shift: float = 0.0,
-        smoothing: float = 0.5,
+        formant_shift: float = 1.0,
+        index_rate: float = 0.75,
     ) -> bytes:
         """Convert voice and return audio bytes."""
         with open(audio_file, "rb") as f:
@@ -194,7 +195,8 @@ class APIClient:
                 params={
                     "target_model_id": target_model_id,
                     "pitch_shift": pitch_shift,
-                    "smoothing": smoothing,
+                    "formant_shift": formant_shift,
+                    "index_rate": index_rate,
                 },
                 timeout=120.0,
             )

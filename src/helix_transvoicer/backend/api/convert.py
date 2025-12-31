@@ -21,13 +21,12 @@ class ConversionRequest(BaseModel):
     """Voice conversion request."""
 
     target_model_id: str
-    pitch_shift: float = 0.0
-    formant_shift: float = 0.0
-    smoothing: float = 0.5
-    crossfade_ms: float = 20.0
-    preserve_breath: bool = True
-    preserve_background: bool = False
+    pitch_shift: float = 0.0  # semitones (-12 to +12)
+    formant_shift: float = 1.0  # ratio (0.8 = deeper, 1.2 = higher)
     normalize_output: bool = True
+    # RVC-specific
+    index_rate: float = 0.75  # Feature retrieval blend (0-1)
+    filter_radius: int = 3  # Pitch median filter
 
 
 class ConversionResponse(BaseModel):
@@ -54,9 +53,9 @@ async def convert_voice(
     file: UploadFile = File(...),
     target_model_id: str = Query(..., description="Target voice model ID"),
     pitch_shift: float = Query(0.0, ge=-12.0, le=12.0),
-    formant_shift: float = Query(0.0, ge=-1.0, le=1.0),
-    smoothing: float = Query(0.5, ge=0.0, le=1.0),
+    formant_shift: float = Query(1.0, ge=0.5, le=2.0, description="Formant ratio (0.8=deeper, 1.2=higher)"),
     normalize: bool = Query(True),
+    index_rate: float = Query(0.75, ge=0.0, le=1.0, description="RVC index rate"),
 ):
     """
     Convert voice in audio file to target voice.
@@ -88,8 +87,8 @@ async def convert_voice(
         config = ConversionConfig(
             pitch_shift=pitch_shift,
             formant_shift=formant_shift,
-            smoothing=smoothing,
             normalize_output=normalize,
+            index_rate=index_rate,
         )
 
         result = converter.convert(tmp_path, target_model_id, config)
@@ -111,7 +110,8 @@ async def convert_and_download(
     file: UploadFile = File(...),
     target_model_id: str = Query(...),
     pitch_shift: float = Query(0.0, ge=-12.0, le=12.0),
-    smoothing: float = Query(0.5, ge=0.0, le=1.0),
+    formant_shift: float = Query(1.0, ge=0.5, le=2.0),
+    index_rate: float = Query(0.75, ge=0.0, le=1.0),
 ):
     """
     Convert voice and return the converted audio file.
@@ -139,7 +139,8 @@ async def convert_and_download(
     try:
         config = ConversionConfig(
             pitch_shift=pitch_shift,
-            smoothing=smoothing,
+            formant_shift=formant_shift,
+            index_rate=index_rate,
         )
 
         result = converter.convert(tmp_path, target_model_id, config)
