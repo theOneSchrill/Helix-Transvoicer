@@ -240,6 +240,37 @@ class RVCInference:
                 config = default_config
                 logger.info(f"Unknown config format, using defaults")
 
+            # Detect architecture variant from checkpoint weights
+            # Check res_skip_layers output size to determine if it uses split (2x) or non-split (1x) channels
+            split_res_skip = True  # default
+            flow_n_layers = 4  # default
+            weights = checkpoint.get("weight", checkpoint)
+            hidden_channels = config["hidden_channels"]
+
+            # Look for flow WN res_skip_layers to detect variant
+            res_skip_key = "flow.flows.0.enc.res_skip_layers.0.bias"
+            if res_skip_key in weights:
+                res_skip_size = weights[res_skip_key].shape[0]
+                # If res_skip output equals hidden_channels, it's the non-split variant
+                # If it equals 2 * hidden_channels, it's the split variant
+                if res_skip_size == hidden_channels:
+                    split_res_skip = False
+                    logger.info(f"Detected non-split WN architecture (res_skip={res_skip_size}, hidden={hidden_channels})")
+                else:
+                    logger.info(f"Detected split WN architecture (res_skip={res_skip_size}, hidden={hidden_channels})")
+
+            # Detect flow n_layers from cond_layer size
+            cond_layer_key = "flow.flows.0.enc.cond_layer.bias"
+            if cond_layer_key in weights:
+                cond_layer_size = weights[cond_layer_key].shape[0]
+                # cond_layer output = (2 * hidden_channels * n_layers) for split
+                # cond_layer output = (hidden_channels * n_layers) for non-split
+                if split_res_skip:
+                    flow_n_layers = cond_layer_size // (2 * hidden_channels)
+                else:
+                    flow_n_layers = cond_layer_size // hidden_channels
+                logger.info(f"Detected flow n_layers={flow_n_layers} from cond_layer size {cond_layer_size}")
+
             # Build and load synthesizer
             from helix_transvoicer.backend.rvc.synthesizer import SynthesizerTrnMs768NSFsid
 
@@ -261,6 +292,8 @@ class RVCInference:
                 config["spk_embed_dim"],
                 config["gin_channels"],
                 config["sr"],
+                split_res_skip=split_res_skip,
+                flow_n_layers=flow_n_layers,
             )
 
             # Load weights

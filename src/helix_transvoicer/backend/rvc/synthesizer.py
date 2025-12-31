@@ -42,6 +42,8 @@ class SynthesizerTrnMs768NSFsid(nn.Module):
         spk_embed_dim: int,
         gin_channels: int,
         sr: int,
+        split_res_skip: bool = True,
+        flow_n_layers: int = 4,
     ):
         super().__init__()
 
@@ -87,14 +89,15 @@ class SynthesizerTrnMs768NSFsid(nn.Module):
             sr,
         )
 
-        # Flow
+        # Flow (uses its own n_layers which may differ from text encoder)
         self.flow = ResidualCouplingBlock(
             inter_channels,
             hidden_channels,
             5,
             1,
-            4,
+            flow_n_layers,
             gin_channels,
+            split_res_skip=split_res_skip,
         )
 
         # Speaker embedding
@@ -348,6 +351,7 @@ class ResidualCouplingBlock(nn.Module):
         dilation_rate: int,
         n_layers: int,
         gin_channels: int = 0,
+        split_res_skip: bool = True,
     ):
         super().__init__()
 
@@ -366,6 +370,7 @@ class ResidualCouplingBlock(nn.Module):
                     n_layers,
                     gin_channels,
                     mean_only=True,
+                    split_res_skip=split_res_skip,
                 )
             )
             self.flows.append(Flip())
@@ -398,6 +403,7 @@ class ResidualCouplingLayer(nn.Module):
         n_layers: int,
         gin_channels: int = 0,
         mean_only: bool = False,
+        split_res_skip: bool = True,
     ):
         super().__init__()
 
@@ -407,7 +413,7 @@ class ResidualCouplingLayer(nn.Module):
         self.mean_only = mean_only
 
         self.pre = nn.Conv1d(self.half_channels, hidden_channels, 1)
-        self.enc = WN(hidden_channels, kernel_size, dilation_rate, n_layers, gin_channels)
+        self.enc = WN(hidden_channels, kernel_size, dilation_rate, n_layers, gin_channels, split_res_skip)
         self.post = nn.Conv1d(hidden_channels, self.half_channels * (1 if mean_only else 2), 1)
 
     def forward(
@@ -437,7 +443,14 @@ class ResidualCouplingLayer(nn.Module):
 
 
 class WN(nn.Module):
-    """WaveNet-style network."""
+    """WaveNet-style network.
+
+    Supports two variants:
+    - split_res_skip=True: res_skip outputs 2*hidden_channels (split into res + skip)
+                          cond_layer outputs 2*hidden_channels per layer
+    - split_res_skip=False: res_skip outputs hidden_channels (used for both res and skip)
+                           cond_layer outputs hidden_channels per layer (applied to first half)
+    """
 
     def __init__(
         self,
@@ -446,12 +459,20 @@ class WN(nn.Module):
         dilation_rate: int,
         n_layers: int,
         gin_channels: int = 0,
+        split_res_skip: bool = True,
     ):
         super().__init__()
 
         self.n_layers = n_layers
+        self.hidden_channels = hidden_channels
+        self.split_res_skip = split_res_skip
         self.in_layers = nn.ModuleList()
         self.res_skip_layers = nn.ModuleList()
+
+        # Determine output channels for res_skip based on variant
+        res_skip_out = 2 * hidden_channels if split_res_skip else hidden_channels
+        # cond_layer: 2x for split variant, 1x for non-split (applied to first half only)
+        cond_out = 2 * hidden_channels * n_layers if split_res_skip else hidden_channels * n_layers
 
         for i in range(n_layers):
             dilation = dilation_rate ** i
@@ -459,10 +480,10 @@ class WN(nn.Module):
             self.in_layers.append(
                 nn.Conv1d(hidden_channels, 2 * hidden_channels, kernel_size, dilation=dilation, padding=padding)
             )
-            self.res_skip_layers.append(nn.Conv1d(hidden_channels, 2 * hidden_channels, 1))
+            self.res_skip_layers.append(nn.Conv1d(hidden_channels, res_skip_out, 1))
 
         if gin_channels > 0:
-            self.cond_layer = nn.Conv1d(gin_channels, 2 * hidden_channels * n_layers, 1)
+            self.cond_layer = nn.Conv1d(gin_channels, cond_out, 1)
 
     def forward(self, x: torch.Tensor, x_mask: torch.Tensor, g: Optional[torch.Tensor] = None):
         output = torch.zeros_like(x)
@@ -470,19 +491,34 @@ class WN(nn.Module):
         if g is not None:
             g = self.cond_layer(g)
 
+        # Calculate per-layer conditioning size
+        cond_per_layer = 2 * self.hidden_channels if self.split_res_skip else self.hidden_channels
+
         for i in range(self.n_layers):
             x_in = self.in_layers[i](x)
 
             if g is not None:
-                cond_offset = i * 2 * x.size(1)
-                g_l = g[:, cond_offset : cond_offset + 2 * x.size(1), :]
-                x_in = x_in + g_l
+                cond_offset = i * cond_per_layer
+                g_l = g[:, cond_offset : cond_offset + cond_per_layer, :]
+                if self.split_res_skip:
+                    # Full conditioning for both gates
+                    x_in = x_in + g_l
+                else:
+                    # Non-split: condition only the first half (tanh gate)
+                    x_in[:, : self.hidden_channels] = x_in[:, : self.hidden_channels] + g_l
 
-            acts = torch.tanh(x_in[:, : x.size(1)]) * torch.sigmoid(x_in[:, x.size(1) :])
+            acts = torch.tanh(x_in[:, : self.hidden_channels]) * torch.sigmoid(x_in[:, self.hidden_channels :])
 
             res_skip_acts = self.res_skip_layers[i](acts)
-            x = (x + res_skip_acts[:, : x.size(1)]) * x_mask
-            output = output + res_skip_acts[:, x.size(1) :]
+
+            if self.split_res_skip:
+                # Split into residual and skip connections
+                x = (x + res_skip_acts[:, : self.hidden_channels]) * x_mask
+                output = output + res_skip_acts[:, self.hidden_channels :]
+            else:
+                # Use same output for both residual and skip
+                x = (x + res_skip_acts) * x_mask
+                output = output + res_skip_acts
 
         return output * x_mask
 
