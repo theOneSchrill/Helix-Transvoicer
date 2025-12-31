@@ -175,26 +175,30 @@ class RVCInference:
 
             if raw_config is None:
                 config = default_config
+                logger.info("No config found, using defaults")
             elif isinstance(raw_config, dict):
-                config = raw_config
-            elif isinstance(raw_config, (list, tuple)):
-                # RVC models often store config as a list in specific order
-                # Common format: [spec_channels, inter_channels, hidden_channels, ...]
-                logger.info(f"Config is a list with {len(raw_config)} elements")
+                # Merge with defaults for any missing keys
                 config = default_config.copy()
-                # Try to map list values to config keys
-                config_keys = [
-                    "spec_channels", "inter_channels", "hidden_channels", "filter_channels",
-                    "n_heads", "n_layers", "kernel_size", "p_dropout", "resblock",
-                    "resblock_kernel_sizes", "resblock_dilation_sizes", "upsample_rates",
-                    "upsample_initial_channel", "upsample_kernel_sizes", "spk_embed_dim",
-                    "gin_channels", "sr"
-                ]
-                for i, key in enumerate(config_keys):
-                    if i < len(raw_config):
-                        config[key] = raw_config[i]
+                config.update(raw_config)
+                logger.info(f"Using dict config, sr={config.get('sr')}")
+            elif isinstance(raw_config, (list, tuple)):
+                # RVC models store config as list - format varies by version
+                logger.info(f"Config is a list with {len(raw_config)} elements: {raw_config}")
+                config = default_config.copy()
+
+                # Try to detect sample rate from list (usually first or last element)
+                for val in raw_config:
+                    if isinstance(val, int) and val in [32000, 40000, 48000]:
+                        config["sr"] = val
+                        logger.info(f"Detected sample rate: {val}")
+                        break
+
+                # Don't try to map list - too many format variations
+                # Just use defaults which work for most v2 models
+                logger.info("Using default v2 config with detected sample rate")
             else:
                 config = default_config
+                logger.info(f"Unknown config type {type(raw_config)}, using defaults")
 
             # Build and load synthesizer
             from helix_transvoicer.backend.rvc.synthesizer import SynthesizerTrnMs768NSFsid
