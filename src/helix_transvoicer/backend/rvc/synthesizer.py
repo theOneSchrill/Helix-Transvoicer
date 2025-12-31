@@ -44,6 +44,7 @@ class SynthesizerTrnMs768NSFsid(nn.Module):
         sr: int,
         split_res_skip: bool = True,
         flow_n_layers: int = 4,
+        last_layer_single: bool = False,
     ):
         super().__init__()
 
@@ -98,6 +99,7 @@ class SynthesizerTrnMs768NSFsid(nn.Module):
             flow_n_layers,
             gin_channels,
             split_res_skip=split_res_skip,
+            last_layer_single=last_layer_single,
         )
 
         # Speaker embedding
@@ -352,6 +354,7 @@ class ResidualCouplingBlock(nn.Module):
         n_layers: int,
         gin_channels: int = 0,
         split_res_skip: bool = True,
+        last_layer_single: bool = False,
     ):
         super().__init__()
 
@@ -371,6 +374,7 @@ class ResidualCouplingBlock(nn.Module):
                     gin_channels,
                     mean_only=True,
                     split_res_skip=split_res_skip,
+                    last_layer_single=last_layer_single,
                 )
             )
             self.flows.append(Flip())
@@ -404,6 +408,7 @@ class ResidualCouplingLayer(nn.Module):
         gin_channels: int = 0,
         mean_only: bool = False,
         split_res_skip: bool = True,
+        last_layer_single: bool = False,
     ):
         super().__init__()
 
@@ -413,7 +418,7 @@ class ResidualCouplingLayer(nn.Module):
         self.mean_only = mean_only
 
         self.pre = nn.Conv1d(self.half_channels, hidden_channels, 1)
-        self.enc = WN(hidden_channels, kernel_size, dilation_rate, n_layers, gin_channels, split_res_skip)
+        self.enc = WN(hidden_channels, kernel_size, dilation_rate, n_layers, gin_channels, split_res_skip, last_layer_single)
         self.post = nn.Conv1d(hidden_channels, self.half_channels * (1 if mean_only else 2), 1)
 
     def forward(
@@ -445,11 +450,11 @@ class ResidualCouplingLayer(nn.Module):
 class WN(nn.Module):
     """WaveNet-style network.
 
-    Supports two variants:
-    - split_res_skip=True: res_skip outputs 2*hidden_channels (split into res + skip)
-                          cond_layer outputs 2*hidden_channels per layer
-    - split_res_skip=False: res_skip outputs hidden_channels (used for both res and skip)
-                           cond_layer outputs hidden_channels per layer (applied to first half)
+    Supports three variants:
+    - split_res_skip=True, last_layer_single=False: All layers output 2*hidden_channels
+    - split_res_skip=True, last_layer_single=True: Layers 0..n-2 output 2*hidden_channels,
+                                                   last layer outputs hidden_channels (skip only)
+    - split_res_skip=False: All layers output hidden_channels (used for both res and skip)
     """
 
     def __init__(
@@ -460,17 +465,17 @@ class WN(nn.Module):
         n_layers: int,
         gin_channels: int = 0,
         split_res_skip: bool = True,
+        last_layer_single: bool = False,
     ):
         super().__init__()
 
         self.n_layers = n_layers
         self.hidden_channels = hidden_channels
         self.split_res_skip = split_res_skip
+        self.last_layer_single = last_layer_single
         self.in_layers = nn.ModuleList()
         self.res_skip_layers = nn.ModuleList()
 
-        # Determine output channels for res_skip based on variant
-        res_skip_out = 2 * hidden_channels if split_res_skip else hidden_channels
         # cond_layer: 2x for split variant, 1x for non-split (applied to first half only)
         cond_out = 2 * hidden_channels * n_layers if split_res_skip else hidden_channels * n_layers
 
@@ -480,6 +485,16 @@ class WN(nn.Module):
             self.in_layers.append(
                 nn.Conv1d(hidden_channels, 2 * hidden_channels, kernel_size, dilation=dilation, padding=padding)
             )
+            # Determine output channels for this layer's res_skip
+            if split_res_skip:
+                if last_layer_single and i == n_layers - 1:
+                    # Last layer outputs only hidden_channels (skip only)
+                    res_skip_out = hidden_channels
+                else:
+                    # Normal split: 2*hidden_channels (res + skip)
+                    res_skip_out = 2 * hidden_channels
+            else:
+                res_skip_out = hidden_channels
             self.res_skip_layers.append(nn.Conv1d(hidden_channels, res_skip_out, 1))
 
         if gin_channels > 0:
@@ -511,10 +526,16 @@ class WN(nn.Module):
 
             res_skip_acts = self.res_skip_layers[i](acts)
 
+            is_last_layer = (i == self.n_layers - 1)
+
             if self.split_res_skip:
-                # Split into residual and skip connections
-                x = (x + res_skip_acts[:, : self.hidden_channels]) * x_mask
-                output = output + res_skip_acts[:, self.hidden_channels :]
+                if self.last_layer_single and is_last_layer:
+                    # Last layer outputs only skip (hidden_channels), no residual added
+                    output = output + res_skip_acts
+                else:
+                    # Split into residual and skip connections
+                    x = (x + res_skip_acts[:, : self.hidden_channels]) * x_mask
+                    output = output + res_skip_acts[:, self.hidden_channels :]
             else:
                 # Use same output for both residual and skip
                 x = (x + res_skip_acts) * x_mask

@@ -244,32 +244,44 @@ class RVCInference:
             # Check res_skip_layers output size to determine if it uses split (2x) or non-split (1x) channels
             split_res_skip = True  # default
             flow_n_layers = 4  # default
+            last_layer_single = False  # default
             weights = checkpoint.get("weight", checkpoint)
             hidden_channels = config["hidden_channels"]
 
-            # Look for flow WN res_skip_layers to detect variant
-            res_skip_key = "flow.flows.0.enc.res_skip_layers.0.bias"
-            if res_skip_key in weights:
-                res_skip_size = weights[res_skip_key].shape[0]
-                # If res_skip output equals hidden_channels, it's the non-split variant
-                # If it equals 2 * hidden_channels, it's the split variant
-                if res_skip_size == hidden_channels:
-                    split_res_skip = False
-                    logger.info(f"Detected non-split WN architecture (res_skip={res_skip_size}, hidden={hidden_channels})")
-                else:
-                    logger.info(f"Detected split WN architecture (res_skip={res_skip_size}, hidden={hidden_channels})")
-
-            # Detect flow n_layers from cond_layer size
+            # Detect flow n_layers from cond_layer size first (needed for last_layer_single detection)
             cond_layer_key = "flow.flows.0.enc.cond_layer.bias"
             if cond_layer_key in weights:
                 cond_layer_size = weights[cond_layer_key].shape[0]
                 # cond_layer output = (2 * hidden_channels * n_layers) for split
                 # cond_layer output = (hidden_channels * n_layers) for non-split
-                if split_res_skip:
-                    flow_n_layers = cond_layer_size // (2 * hidden_channels)
-                else:
+                # Assume split first to detect n_layers
+                flow_n_layers = cond_layer_size // (2 * hidden_channels)
+                if flow_n_layers == 0:
                     flow_n_layers = cond_layer_size // hidden_channels
+                    split_res_skip = False
                 logger.info(f"Detected flow n_layers={flow_n_layers} from cond_layer size {cond_layer_size}")
+
+            # Look for flow WN res_skip_layers to detect variant
+            res_skip_key_0 = "flow.flows.0.enc.res_skip_layers.0.bias"
+            if res_skip_key_0 in weights:
+                res_skip_size_0 = weights[res_skip_key_0].shape[0]
+                # If first layer res_skip equals hidden_channels, it's the non-split variant
+                # If it equals 2 * hidden_channels, it's the split variant
+                if res_skip_size_0 == hidden_channels:
+                    split_res_skip = False
+                    logger.info(f"Detected non-split WN architecture (res_skip={res_skip_size_0}, hidden={hidden_channels})")
+                else:
+                    split_res_skip = True
+                    logger.info(f"Detected split WN architecture (res_skip={res_skip_size_0}, hidden={hidden_channels})")
+
+                    # Check if last layer has different size (last_layer_single variant)
+                    if flow_n_layers > 1:
+                        last_layer_key = f"flow.flows.0.enc.res_skip_layers.{flow_n_layers - 1}.bias"
+                        if last_layer_key in weights:
+                            res_skip_size_last = weights[last_layer_key].shape[0]
+                            if res_skip_size_last == hidden_channels:
+                                last_layer_single = True
+                                logger.info(f"Detected last_layer_single variant (last layer res_skip={res_skip_size_last})")
 
             # Build and load synthesizer
             from helix_transvoicer.backend.rvc.synthesizer import SynthesizerTrnMs768NSFsid
@@ -294,6 +306,7 @@ class RVCInference:
                 config["sr"],
                 split_res_skip=split_res_skip,
                 flow_n_layers=flow_n_layers,
+                last_layer_single=last_layer_single,
             )
 
             # Load weights
