@@ -147,32 +147,54 @@ class RVCInference:
         try:
             logger.info(f"Loading RVC model: {model_path}")
 
-            checkpoint = torch.load(str(model_path), map_location=self.device)
+            checkpoint = torch.load(str(model_path), map_location=self.device, weights_only=False)
 
-            # Extract model configuration
-            if "config" in checkpoint:
-                config = checkpoint["config"]
+            # Extract model configuration - RVC models store config in various formats
+            raw_config = checkpoint.get("config", None)
+
+            # Default v2 config
+            default_config = {
+                "spec_channels": 1025,
+                "inter_channels": 192,
+                "hidden_channels": 192,
+                "filter_channels": 768,
+                "n_heads": 2,
+                "n_layers": 6,
+                "kernel_size": 3,
+                "p_dropout": 0,
+                "resblock": "1",
+                "resblock_kernel_sizes": [3, 7, 11],
+                "resblock_dilation_sizes": [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+                "upsample_rates": [10, 10, 2, 2],
+                "upsample_initial_channel": 512,
+                "upsample_kernel_sizes": [16, 16, 4, 4],
+                "spk_embed_dim": 109,
+                "gin_channels": 256,
+                "sr": 40000,
+            }
+
+            if raw_config is None:
+                config = default_config
+            elif isinstance(raw_config, dict):
+                config = raw_config
+            elif isinstance(raw_config, (list, tuple)):
+                # RVC models often store config as a list in specific order
+                # Common format: [spec_channels, inter_channels, hidden_channels, ...]
+                logger.info(f"Config is a list with {len(raw_config)} elements")
+                config = default_config.copy()
+                # Try to map list values to config keys
+                config_keys = [
+                    "spec_channels", "inter_channels", "hidden_channels", "filter_channels",
+                    "n_heads", "n_layers", "kernel_size", "p_dropout", "resblock",
+                    "resblock_kernel_sizes", "resblock_dilation_sizes", "upsample_rates",
+                    "upsample_initial_channel", "upsample_kernel_sizes", "spk_embed_dim",
+                    "gin_channels", "sr"
+                ]
+                for i, key in enumerate(config_keys):
+                    if i < len(raw_config):
+                        config[key] = raw_config[i]
             else:
-                # Default v2 config
-                config = {
-                    "spec_channels": 1025,
-                    "inter_channels": 192,
-                    "hidden_channels": 192,
-                    "filter_channels": 768,
-                    "n_heads": 2,
-                    "n_layers": 6,
-                    "kernel_size": 3,
-                    "p_dropout": 0,
-                    "resblock": "1",
-                    "resblock_kernel_sizes": [3, 7, 11],
-                    "resblock_dilation_sizes": [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
-                    "upsample_rates": [10, 10, 2, 2],
-                    "upsample_initial_channel": 512,
-                    "upsample_kernel_sizes": [16, 16, 4, 4],
-                    "spk_embed_dim": 109,
-                    "gin_channels": 256,
-                    "sr": 40000,
-                }
+                config = default_config
 
             # Build and load synthesizer
             from helix_transvoicer.backend.rvc.synthesizer import SynthesizerTrnMs768NSFsid
@@ -199,15 +221,16 @@ class RVCInference:
 
             # Load weights
             if "weight" in checkpoint:
-                self._current_rvc_model.load_state_dict(checkpoint["weight"])
+                self._current_rvc_model.load_state_dict(checkpoint["weight"], strict=False)
             else:
-                self._current_rvc_model.load_state_dict(checkpoint)
+                self._current_rvc_model.load_state_dict(checkpoint, strict=False)
 
             self._current_rvc_model.to(self.device)
             self._current_rvc_model.eval()
             self._current_model_path = model_path
 
-            logger.info(f"RVC model loaded successfully (SR: {config.get('sr', 40000)})")
+            sr = config["sr"] if isinstance(config, dict) else 40000
+            logger.info(f"RVC model loaded successfully (SR: {sr})")
             return True
 
         except Exception as e:
